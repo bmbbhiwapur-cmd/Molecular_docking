@@ -4,8 +4,6 @@ import os
 import urllib.request
 import json
 import re
-import sqlite3
-from datetime import datetime
 import numpy as np
 import pandas as pd
 from rdkit import Chem
@@ -13,90 +11,6 @@ from rdkit.Chem import AllChem
 from rdkit.Chem import Draw
 import streamlit.components.v1 as components
 import base64
-
-# --- PERSISTENT HISTORY DATABASE ENGINE MANAGEMENT ---
-
-DB_FILE = "docking_history.db"
-
-def initialize_history_database():
-    """Establishes local SQLite structural tables to securely archive screening runs."""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS runs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT,
-            protein_id TEXT,
-            ligand_name TEXT,
-            grid_cx REAL,
-            grid_cy REAL,
-            grid_cz REAL,
-            grid_sx INTEGER,
-            grid_sy INTEGER,
-            grid_sz INTEGER,
-            exhaustiveness INTEGER,
-            serialized_ligand TEXT,
-            ligand_summary TEXT,
-            smiles_cache TEXT,
-            docking_results_raw TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-initialize_history_database()
-
-def save_run_to_history(protein_id, ligand_name, cx, cy, cz, sx, sy, sz, exhaustiveness, serialized_ligand, ligand_summary, smiles_cache, results_raw):
-    """Inserts a completed calculation pass profile row safely into SQLite memory matrix."""
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        cursor.execute("""
-            INSERT INTO runs (
-                timestamp, protein_id, ligand_name, grid_cx, grid_cy, grid_cz, 
-                grid_sx, grid_sy, grid_sz, exhaustiveness, serialized_ligand, 
-                ligand_summary, smiles_cache, docking_results_raw
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            now_str, protein_id, ligand_name, float(cx), float(cy), float(cz),
-            int(sx), int(sy), int(sz), int(exhaustiveness), serialized_ligand,
-            ligand_summary, smiles_cache, results_raw
-        ))
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        st.error(f"Database logging failure: {e}")
-        return False
-
-def fetch_all_history_records():
-    """Extracts summary index parameters to populate selection filters."""
-    if not os.path.exists(DB_FILE):
-        return []
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, timestamp, protein_id, ligand_name FROM runs ORDER BY id DESC")
-    rows = cursor.fetchall()
-    conn.close()
-    return rows
-
-def fetch_single_run_details(run_id):
-    """Pulls whole operational profile data blocks to auto-hydrate session states."""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM runs WHERE id = ?", (run_id,))
-    row = cursor.fetchone()
-    conn.close()
-    if row:
-        return {
-            "timestamp": row[1], "protein_id": row[2], "ligand_name": row[3],
-            "cx": row[4], "cy": row[5], "cz": row[6], "sx": row[7], "sy": row[8], "sz": row[9],
-            "exhaustiveness": row[10], "serialized_ligand": row[11], "ligand_summary": row[12],
-            "smiles_cache": row[13], "results_raw": row[14]
-        }
-    return None
-
 
 # --- CLOUD CONTEXT ENGINE MANAGEMENT ---
 
@@ -118,6 +32,7 @@ ensure_linux_vina_exists()
 # --- PUBCHEM AUTOMATED DATA CONVERTER ---
 
 def fetch_ligand_data_from_pubchem(smiles_string):
+    """Queries NCBI PubChem REST API to dynamically fetch validated small molecule attributes."""
     metadata = {"name": "Unknown Compound Name", "mw": "N/A", "formula": "N/A"}
     try:
         escaped_smiles = urllib.parse.quote(smiles_string)
@@ -320,7 +235,7 @@ def convert_smiles_to_pdbqt(smiles_string, output_filename="ligand.pdbqt"):
     except Exception as e: return False, str(e)
 
 
-# --- LOG FILE PARSERS (POSITIONED HIGH UP AT GBL CAPABLE WORKSPACES) ---
+# --- LOG FILE PARSERS ---
 
 def split_docking_poses(poses_file_path):
     poses = {}
@@ -407,6 +322,7 @@ def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon
 st.set_page_config(page_title="In Silico Docking Hub", layout="wide")
 st.title("🔬 Automated Molecular Docking Studio")
 
+# Initialize states safely
 if "cx" not in st.session_state: st.session_state.cx = 0.0
 if "cy" not in st.session_state: st.session_state.cy = 0.0
 if "cz" not in st.session_state: st.session_state.cz = 0.0
@@ -422,40 +338,15 @@ if "serialized_ligand_block" not in st.session_state: st.session_state.serialize
 if "ligand_summary_text" not in st.session_state: st.session_state.ligand_summary_text = ""
 if "smiles_cache" not in st.session_state: st.session_state.smiles_cache = ""
 
-# --- SIDEBAR DATABASE RUN HISTORY MATRIX PANEL ---
-st.sidebar.header("📁 Docking Run History Matrix")
-history_records = fetch_all_history_records()
-
-if history_records:
-    history_options = {f"Run #{r[0]} | Prot: {r[2]} | Lig: {r[3][:15]}... [{r[1]}]": r[0] for r in history_records}
-    selected_history_label = st.sidebar.selectbox("Select Previous Run to Auto-Populate:", ["-- Active Workspace --"] + list(history_options.keys()))
-    
-    if selected_history_label != "-- Active Workspace --":
-        selected_run_id = history_options[selected_history_label]
-        run_data = fetch_single_run_details(selected_run_id)
-        
-        if run_data:
-            st.session_state.cx = run_data["cx"]
-            st.session_state.cy = run_data["cy"]
-            st.session_state.cz = run_data["cz"]
-            st.session_state.sx = run_data["sx"]
-            st.session_state.sy = run_data["sy"]
-            st.session_state.sz = run_data["sz"]
-            st.session_state.exhaustiveness = run_data["exhaustiveness"]
-            st.session_state.serialized_ligand_block = run_data["serialized_ligand"]
-            st.session_state.ligand_summary_text = run_data["ligand_summary"]
-            st.session_state.smiles_cache = run_data["smiles_cache"]
-            st.session_state.docking_results_raw = run_data["results_raw"]
-            st.session_state.target_ready = True
-            st.session_state.ligand_ready = True
-            st.session_state.pdb_id_display = run_data["protein_id"]
-            
-            with open("ligand.pdbqt", "w") as f: f.write(run_data["serialized_ligand"])
-            # Reconstruct dummy coordinate trace file if rehydrating historical data matrices
-            with open("docking_poses.pdbqt", "w") as f: f.write("")
-            st.sidebar.success(f"Loaded Run #{selected_run_id}!")
-else:
-    st.sidebar.info("No saved computational runs discovered inside the database matrix yet.")
+# --- MASTER ENVIRONMENT RESET ACTIONS ---
+if st.button("🔄 Reset Entire Environment for Fresh Docking", type="secondary", use_container_width=True):
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    # Clean system background operational scratch files
+    for f in ["protein.pdbqt", "ligand.pdbqt", "docking_poses.pdbqt", "temp_lig_state.pdb"]:
+        if os.path.exists(f): os.remove(f)
+    st.success("Dashboard cache and runtime structures completely cleared!")
+    st.rerun()
 
 col_params, col_visual = st.columns([1, 1])
 
@@ -619,7 +510,6 @@ with col_visual:
                 except Exception: pass
     else:
         st.subheader("Interactive Complex Viewport")
-        # HARD GUARD CONTEXT: Halts rendering if poses map template doesn't yet exist on server disk memory space
         if os.path.exists("docking_poses.pdbqt"):
             parsed_poses = split_docking_poses("docking_poses.pdbqt")
             if parsed_poses:
@@ -645,11 +535,15 @@ with col_visual:
                     else: amino_acid_categories["Hydrophobic"].append(res_full)
                 
                 breakdown_html = ""
+                report_breakdown_text = ""
                 for cat_name, res_list in amino_acid_categories.items():
                     if res_list:
                         labels_joined = ", ".join(list(set(res_list)))
                         breakdown_html += f"<p style='margin:4px 0; font-size:13px;'><b>{cat_name}:</b> <span style='color:#333;'>{labels_joined}</span></p>"
-                if not breakdown_html: breakdown_html = "<p style='margin:4px 0; color:#777; font-size:13px;'>No pocket interactions detected.</p>"
+                        report_breakdown_text += f"- {cat_name}: {labels_joined}\n"
+                if not breakdown_html: 
+                    breakdown_html = "<p style='margin:4px 0; color:#777; font-size:13px;'>No pocket interactions detected.</p>"
+                    report_breakdown_text = "- No close contacts detected under 3.8 Angstroms.\n"
 
                 html_metric_card = """
                 <div style="background-color:#f0f7f4; border-left:6px solid #2e7d32; padding:16px; border-radius:8px; margin-bottom:15px; font-family:sans-serif;">
@@ -666,7 +560,7 @@ with col_visual:
                     <div>
                         <span style="font-size:11px; color:#666; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px; display:block; margin-bottom:4px;">Binding Site Amino Acid Properties Breakdown:</span>
                         {}
-                </div>
+                    </div>
                 </div>
                 """.format(pose_affinity_score, len(active_interactions), breakdown_html)
                 st.html(html_metric_card)
@@ -679,6 +573,46 @@ with col_visual:
                     
                 render_advanced_modeling_blueprint(receptor_data=protein_data, ligand_data=parsed_poses[selected_pose], mode=style_mode, show_surface=surf_toggle, interactions_list=active_interactions)
                 
+                # --- AUTOMATED COMPREHENSIVE MOLECULAR INTERACTION REPORT ENGINE ---
+                st.write("---")
+                st.subheader("📋 Comprehensive In Silico Screening Report")
+                
+                report_content = f"""=======================================================
+MOLECULAR DOCKING SCREENING ANALYSIS REPORT
+Generated dynamically via VinaDock Pro Architecture
+=======================================================
+
+1. TARGET RECEPTOR MACROMOLECULE PROFILE
+-------------------------------------------------------
+- Target Configuration Identifier: {st.session_state.pdb_id_display}
+- Primary Structure Data Source: RCSB Protein Data Bank Server
+
+2. SMALL MOLECULE DRUG LIGAND PROFILE
+-------------------------------------------------------
+- Input Structural Identity Matrix: {st.session_state.get('smiles_cache', 'Uploaded File Data Track')}
+- Compiled Chemical Attributes: {st.session_state.ligand_summary_text.replace('**','')}
+
+3. BOUND SPACE CONFIGURATION MECHANICS (GRID BOX)
+-------------------------------------------------------
+- Center Coordinates Vector (X, Y, Z): ({grid_cx}, {grid_cy}, {grid_cz})
+- Grid Bounding Dimensions (X, Y, Z): ({grid_sx} Å, {grid_sy} Å, {grid_sz} Å)
+- Search Algorithm Exhaustiveness Index: {exhaustiveness}
+
+4. ACTIVE POSE COMPLEX BINDING METRICS (SELECTED MODE)
+-------------------------------------------------------
+- Target Alignment Selection Mode: Mode {selected_pose} Pose Fit
+- Computed Gibbs Free Energy Affinity: {pose_affinity_score} kcal/mol
+- Measured Total Spatial Proximity Contact Atoms: {len(active_interactions)}
+
+5. POCKET CONTACT RESIDUES PROACTIVE BREAKDOWN
+-------------------------------------------------------
+{report_breakdown_text}
+=======================================================
+Report compiled successfully. Ready for manuscript citation.
+=======================================================
+"""
+                st.text_area("Copy Code Summary Report Log Sheet Block directly:", value=report_content, height=320)
+                
                 st.subheader("🧬 Local Contact Residues & Bond Assignments Matrix")
                 if active_interactions:
                     df_int = pd.DataFrame(active_interactions)
@@ -687,10 +621,6 @@ with col_visual:
                     st.info("No close contacts detected within a 3.8 Å threshold radius.")
         else:
             st.info("Initializing active layout matrices workspace pipelines...")
-            
-        if st.button("🔄 Reset Environment Canvas"):
-            st.session_state.docking_results_raw = None
-            st.rerun()
 
     # --- ENGINE COMPUTATION EXECUTION BOUNDARY ---
     if run_btn and can_dock:
@@ -700,26 +630,7 @@ with col_visual:
                 process = subprocess.run(vina_command, capture_output=True, text=True, check=True)
                 if process.stdout:
                     st.session_state.docking_results_raw = process.stdout
-                    
-                    lig_id_text = "Compound"
-                    if ligand_source == "SMILES String Input" and smiles_input_val:
-                        lig_id_text = smiles_input_val[:12]
-                    elif uploaded_lig_name:
-                        lig_id_text = uploaded_lig_name
-                    
-                    save_run_to_history(
-                        protein_id=st.session_state.pdb_id_display,
-                        ligand_name=lig_id_text,
-                        cx=grid_cx, cy=grid_cy, cz=grid_cz,
-                        sx=grid_sx, sy=grid_sy, sz=grid_sz,
-                        exhaustiveness=exhaustiveness,
-                        serialized_ligand=st.session_state.serialized_ligand_block,
-                        ligand_summary=st.session_state.ligand_summary_text,
-                        smiles_cache=st.session_state.smiles_cache,
-                        results_raw=process.stdout
-                    )
-                    
-                    st.success("Calculations complete and saved to historical database logs!")
+                    st.success("Calculations complete!")
                     st.rerun()
             except subprocess.CalledProcessError as err: st.error("Calculations exited with error flags."); st.code(err.stderr if err.stderr else err.stdout)
 
