@@ -462,12 +462,12 @@ with col_params:
             st.success("Structural file loaded and ready for docking!") 
             
             temp_pdb = "temp_lig_state.pdb"
-                Chem.MolToPDBFile(mol, temp_pdb)
-                convert_pdb_to_pdbqt(temp_pdb, "ligand.pdbqt", is_ligand=True)
+            Chem.MolToPDBFile(mol, temp_pdb)
+            convert_pdb_to_pdbqt(temp_pdb, "ligand.pdbqt", is_ligand=True)
                 
-                st.session_state.ligand_ready = True
-                st.session_state.smiles_cache = temp_in
-                with open("ligand.pdbqt", "r") as f: st.session_state.serialized_ligand_block = f.read()
+            st.session_state.ligand_ready = True
+            st.session_state.smiles_cache = temp_in
+            with open("ligand.pdbqt", "r") as f: st.session_state.serialized_ligand_block = f.read()
                 
                 # 3. Update summary with PubChem data + RDKit calculations
                 st.session_state.ligand_summary_text = (
