@@ -427,39 +427,39 @@ with col_params:
                 except Exception as e: st.error(f"SMILES Parsing Failure: {e}")
             
     elif ligand_source == "Upload Structural File (.pdb, .sdf)" and uploaded_lig_buffer is not None:
-            temp_in = f"raw_ligand_{uploaded_lig_name}"
-            with open(temp_in, "wb") as f: f.write(uploaded_lig_buffer.getbuffer())
+        temp_in = f"raw_ligand_{uploaded_lig_name}"
+        with open(temp_in, "wb") as f: 
+            f.write(uploaded_lig_buffer.getbuffer())
+        
+        # Load molecule
+        mol = Chem.MolFromPDBFile(temp_in, removeHs=False) if uploaded_lig_name.endswith(".pdb") else Chem.SDMolSupplier(temp_in, removeHs=False)[0]
+        
+        if mol:
+            try:
+                Chem.SanitizeMol(mol)
+                AllChem.AssignBondOrdersFromTopology(mol)
+            except Exception: pass
             
-            # Load molecule
-            mol = Chem.MolFromPDBFile(temp_in, removeHs=False) if uploaded_lig_name.endswith(".pdb") else Chem.SDMolSupplier(temp_in, removeHs=False)[0]
+            if mol.GetNumConformers() == 0:
+                mol = Chem.AddHs(mol)
+                AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
+                AllChem.MMFFOptimizeMolecule(mol)
             
-            if mol:
-                # 1. GENERATE SMILES AND FETCH DATA GRACEFULLY
-                try:
-                    smiles_from_file = Chem.MolToSmiles(mol)
-                    pub_data = fetch_ligand_data_from_pubchem(smiles_from_file)
-                    # Update summary only if fetch is successful
-                    st.session_state.ligand_summary_text = (
-                        f"**Name:** {pub_data['name']} | **Formula:** {pub_data['formula']} | "
-                        f"**MW:** {round(Descriptors.MolWt(mol), 2)} g/mol"
-                    )
-                except Exception:
-                    # If fetch fails, provide a fallback message instead of crashing
-                    st.session_state.ligand_summary_text = (
-                        f"**Name:** File Upload | **Formula:** {Chem.CalcMolFormula(mol)} | "
-                        f"**MW:** {round(Descriptors.MolWt(mol), 2)} g/mol (Metadata Unavailable)"
-                    )
-                
-                # 2. Proceed with your standard processing logic (This remains outside the try-except)
-                try:
-                    Chem.SanitizeMol(mol)
-                    AllChem.AssignBondOrdersFromTopology(mol)
-                except Exception: pass
-                
-                if mol.GetNumConformers() == 0:
-                    mol = Chem.AddHs(mol)
-                    AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
-                    AllChem.MMFFOptimizeMolecule(mol)
+            temp_pdb = "temp_lig_state.pdb"
+            Chem.MolToPDBFile(mol, temp_pdb)
+            convert_pdb_to_pdbqt(temp_pdb, "ligand.pdbqt", is_ligand=True)
+            
+            st.session_state.ligand_ready = True
+            st.session_state.smiles_cache = temp_in
+            with open("ligand.pdbqt", "r") as f: 
+                st.session_state.serialized_ligand_block = f.read()
+            
+            # Simplified status message only
+            st.session_state.ligand_summary_text = "Ligand structure loaded successfully."
+            
+            if os.path.exists(temp_in): os.remove(temp_in)
+            if os.path.exists(temp_pdb): os.remove(temp_pdb)
+            st.success("Structural file loaded and ready for docking!")
                 
                 temp_pdb = "temp_lig_state.pdb"
                 Chem.MolToPDBFile(mol, temp_pdb)
