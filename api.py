@@ -459,7 +459,8 @@ with col_params:
             
             if os.path.exists(temp_in): os.remove(temp_in)
             if os.path.exists(temp_pdb): os.remove(temp_pdb)
-            st.success("Structural file loaded and ready for docking!")   
+            st.success("Structural file loaded and ready for docking!") 
+            
             temp_pdb = "temp_lig_state.pdb"
                 Chem.MolToPDBFile(mol, temp_pdb)
                 convert_pdb_to_pdbqt(temp_pdb, "ligand.pdbqt", is_ligand=True)
