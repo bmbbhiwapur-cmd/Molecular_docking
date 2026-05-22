@@ -581,7 +581,7 @@ with col_visual:
                 
                 report_content = f"""=======================================================
 MOLECULAR DOCKING SCREENING ANALYSIS REPORT
-Generated dynamically via InSilico BioSphere VinaDock Pro Architecture
+Generated dynamically via InSilico BioSphere Docking Tool
 Developed by: Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, Shivaji Science College, Nagpur, India | Contact: sarangresearch@gmail.com
 =======================================================
 
@@ -615,6 +615,13 @@ Report compiled successfully. Ready for manuscript citation.
 **InSilico BioSphere: An Integrated Platform for Automated Molecular Docking.**
     Developed by Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, 
     Shivaji Science College, Nagpur, India.
+    *Recommended BibTeX Citation:*
+    ```bibtex
+    @software{dhote2026insilico,
+      author = {Dhote, Sarang S.},
+      title = {InSilico BioSphere: Automated Docking Studio},
+      year = {2026},
+      publisher = {Shivaji Science College, Nagpur, India}
 =======================================================
 """
                 st.text_area("Copy Code Summary Report Log Sheet Block directly:", value=report_content, height=320)
