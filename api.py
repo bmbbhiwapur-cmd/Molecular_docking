@@ -2,35 +2,48 @@ import streamlit as st
 import subprocess
 import os
 import urllib.request
-import tarfile
 from rdkit import Chem
 from rdkit.Chem import AllChem
-from stmol import showmol
 import py3Dmol
+import streamlit.components.v1 as components
 
 # --- CLOUD CONTEXT ENGINE MANAGEMENT ---
 
 def ensure_linux_vina_exists():
-    """
-    Checks if the Linux binary for AutoDock Vina exists locally.
-    If running in a cloud instance, it downloads and prepares the static executable.
-    """
     binary_name = "./vina"
     if not os.path.exists(binary_name):
         with st.spinner("Initializing Cloud Computational Server Environment (Downloading Vina)..."):
             try:
-                # URL for compiled Linux AutoDock Vina binary 
                 url = "https://github.com/ccsb-scripps/AutoDock-Vina/releases/download/v1.2.5/vina_1.2.5_linux_x86_64"
                 urllib.request.urlretrieve(url, binary_name)
-                
-                # Grant execution permissions to the system file binary
                 os.chmod(binary_name, 0o755)
                 st.success("Cloud backend binaries mounted successfully!")
             except Exception as e:
                 st.error(f"Failed to bootstrap Linux engine environment: {e}")
 
-# Call the initializer immediately to set up the web container environment
 ensure_linux_vina_exists()
+
+
+# --- NATIVE PY3DMOL VISUALIZATION COUPLING ---
+
+def render_molecule_html(pdb_string):
+    """
+    Bypasses stmol dependency by generating an isolated 
+    HTML/JS iframe string to execute py3Dmol smoothly.
+    """
+    html_content = f"""
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.0.4/3Dmol-min.js"></script>
+    <div id="container" style="height: 350px; width: 100%; position: relative;"></div>
+    <script>
+        let viewer = $3Dmol.createViewer(document.getElementById('container'), {{backgroundColor: 'white'}});
+        viewer.addModel(`{pdb_string}`, 'pdb');
+        viewer.setStyle({{}}, {{stick: {{colorscheme: 'cyanCarbon'}}}});
+        viewer.zoomTo();
+        viewer.render();
+    </script>
+    """
+    # Embed the HTML component safely inside the Streamlit viewport frame
+    components.html(html_content, height=360)
 
 
 # --- CHEMINFORMATICS TOPO CONVERSION ---
@@ -100,11 +113,8 @@ with col_visual:
             with open(res, "r") as f:
                 ligand_data = f.read()
             
-            view = py3Dmol.view(width=400, height=300)
-            view.addModel(ligand_data, "pdb")
-            view.setStyle({'stick': {'colorscheme': 'cyanCarbon'}})
-            view.zoomTo()
-            showmol(view, height=300)
+            # Call our custom HTML rendering routine instead of stmol
+            render_molecule_html(ligand_data)
         else:
             st.error(f"Structure Building Failed: {res}")
 
