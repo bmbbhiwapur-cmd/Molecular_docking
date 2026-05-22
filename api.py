@@ -39,24 +39,28 @@ def fetch_pdb_from_rcsb(pdb_id):
 def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt"):
     """
     Parses a standard PDB structural file and builds a compliant PDBQT format
-    by applying the strict official column constraints expected by Vina.
+    by applying the strict official column constraints and normalizing 
+    case-sensitive AutoDock atom type strings.
     """
+    # Dictionary mapping standard chemical elements to exact, case-sensitive AutoDock Vina atom types
+    autodock_type_map = {
+        "H": "H", "HD": "HD", "HS": "HS", "C": "C", "A": "A", 
+        "N": "N", "NA": "NA", "NS": "NS", "O": "O", "OA": "OA", 
+        "S": "S", "SA": "SA", "P": "P", "F": "F", 
+        "CL": "Cl", "BR": "Br", "I": "I", "ZN": "Zn", "MG": "Mg"
+    }
+
     try:
         with open(input_pdb, "r") as pdb, open(output_pdbqt, "w") as pdbqt:
             for line in pdb:
                 if line.startswith(("ATOM", "HETATM")):
-                    parts = line.split()
-                    if len(parts) < 6:
-                        continue
-                        
-                    # Standard token mapping
                     record_type = line[:6].strip()  # ATOM or HETATM
                     try:
                         atom_id = int(line[6:11].strip())
                     except ValueError:
                         atom_id = 1
                         
-                    atom_name = line[12:16]          # Keep original 4-char padding spacing
+                    atom_name = line[12:16]          # Keep original 4-char space padding
                     res_name = line[17:20].strip()
                     chain_id = line[21].strip()
                     if not chain_id:
@@ -67,43 +71,38 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt"):
                     except ValueError:
                         res_seq = 1
                         
-                    # Safely parse the core coordinate blocks via explicit column indices
+                    # Parse numerical coordinate blocks using strict spatial slicing
                     try:
                         x = float(line[30:38].strip())
                         y = float(line[38:46].strip())
                         z = float(line[46:54].strip())
                     except ValueError:
-                        # Fallback row processing if file formatting has custom alterations
                         continue
                         
-                    # Determine element types cleanly
+                    # Determine elemental symbols safely
                     element = line[76:78].strip()
                     if not element:
+                        # Fallback: extract alphabet character from atom name string token
                         element = ''.join([c for c in atom_name if c.isalpha()])[0]
                     element = ''.join([c for c in element if c.isalpha()]).upper()
-                    if not element:
-                        element = "C"
-                        
-                    if element == "C" and "AR" in atom_name.upper():
-                        element = "A" # Aromatic Carbon assignment
+                    
+                    # Normalize formatting text to settle the case-sensitivity rule
+                    if element in autodock_type_map:
+                        vina_type = autodock_type_map[element]
+                    else:
+                        vina_type = element.title() # e.g. BR -> Br, CL -> Cl
 
-                    # Build the line using standard character width templates:
-                    # %-6s : ATOM/HETATM (cols 1-6)
-                    # %5d  : Atom serial index (cols 7-11)
-                    #  %-4s: Atom name placeholder with spacing buffer (cols 13-16)
-                    # %3s  : Residue identifier name (cols 17-20)
-                    #  %1s : Chain assignment (col 22)
-                    # %4d  : Residue sequence coordinate index (cols 23-26)
-                    # %8.3f: X, Y, Z coordinate metrics (cols 31-54)
-                    # %6.2f: Occupancy factor (cols 55-60)
-                    # %6.2f: Temp B-Factor scale (cols 61-66)
-                    # %10s : Charge space string formatting (cols 67-76)
-                    #  %-2s: AutoDock element flag type assignment (cols 78-79)
+                    # Detect aromatic carbons for appropriate forcefield modeling
+                    if element == "C" and "AR" in atom_name.upper():
+                        vina_type = "A"
+
+                    # Construct structural output row ensuring strict alignment boundaries:
+                    # Coords down to col 54, occupancy to 60, B-factor to 66, charge space to 76, element at 78
                     pdbqt_line = (
                         f"{record_type:<6}{atom_id:>5} {atom_name:<4} {res_name:>3} "
                         f"{chain_id}{res_seq:>4}    "
                         f"{x:>8.3f}{y:>8.3f}{z:>8.3f}{1.00:>6.2f}{0.00:>6.2f}    "
-                        f"+0.000 {element:<2}\n"
+                        f"+0.000 {vina_type:<2}\n"
                     )
                     pdbqt.write(pdbqt_line)
                     
