@@ -459,7 +459,6 @@ with col_params:
             if os.path.exists(temp_pdb):
                 os.remove(temp_pdb)
             st.success("Structural file loaded and ready for docking!")
-                )
                 
                 if os.path.exists(temp_in): os.remove(temp_in)
                 if os.path.exists(temp_pdb): os.remove(temp_pdb)
