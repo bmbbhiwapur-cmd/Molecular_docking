@@ -36,13 +36,11 @@ def fetch_pdb_from_rcsb(pdb_id):
     except Exception as e:
         return False, f"Could not find or download PDB ID '{pdb_id.upper()}'. Check your internet link or ID format."
 
-def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt"):
+def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=False):
     """
-    Parses a standard PDB structural file and builds a compliant PDBQT format
-    by applying the strict official column constraints and normalizing 
-    case-sensitive AutoDock atom type strings.
+    Parses a standard PDB structural file and builds a compliant PDBQT format.
+    If processing a ligand, it wraps the atomic coordinates inside ROOT/ENDROOT markers.
     """
-    # Dictionary mapping standard chemical elements to exact, case-sensitive AutoDock Vina atom types
     autodock_type_map = {
         "H": "H", "HD": "HD", "HS": "HS", "C": "C", "A": "A", 
         "N": "N", "NA": "NA", "NS": "NS", "O": "O", "OA": "OA", 
@@ -52,6 +50,10 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt"):
 
     try:
         with open(input_pdb, "r") as pdb, open(output_pdbqt, "w") as pdbqt:
+            # If it's a ligand, Vina strictly requires it to begin with a ROOT tag
+            if is_ligand:
+                pdbqt.write("ROOT\n")
+
             for line in pdb:
                 if line.startswith(("ATOM", "HETATM")):
                     record_type = line[:6].strip()  # ATOM or HETATM
@@ -82,22 +84,20 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt"):
                     # Determine elemental symbols safely
                     element = line[76:78].strip()
                     if not element:
-                        # Fallback: extract alphabet character from atom name string token
                         element = ''.join([c for c in atom_name if c.isalpha()])[0]
                     element = ''.join([c for c in element if c.isalpha()]).upper()
                     
-                    # Normalize formatting text to settle the case-sensitivity rule
+                    # Normalize case sensitivity rules
                     if element in autodock_type_map:
                         vina_type = autodock_type_map[element]
                     else:
-                        vina_type = element.title() # e.g. BR -> Br, CL -> Cl
+                        vina_type = element.title()
 
-                    # Detect aromatic carbons for appropriate forcefield modeling
+                    # Detect aromatic carbons
                     if element == "C" and "AR" in atom_name.upper():
                         vina_type = "A"
 
-                    # Construct structural output row ensuring strict alignment boundaries:
-                    # Coords down to col 54, occupancy to 60, B-factor to 66, charge space to 76, element at 78
+                    # Build perfectly formatted line entry
                     pdbqt_line = (
                         f"{record_type:<6}{atom_id:>5} {atom_name:<4} {res_name:>3} "
                         f"{chain_id}{res_seq:>4}    "
@@ -106,9 +106,16 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt"):
                     )
                     pdbqt.write(pdbqt_line)
                     
-                elif line.startswith("TER"):
+                elif line.startswith("TER") and not is_ligand:
                     pdbqt.write("TER\n")
-            pdbqt.write("ENDMDL\n")
+            
+            # Close ligand structural blocks correctly
+            if is_ligand:
+                pdbqt.write("ENDROOT\n")
+                pdbqt.write("TORSDOF 0\n")  # Sets default active rotatable bonds count
+            else:
+                pdbqt.write("ENDMDL\n")
+                
         return True, output_pdbqt
     except Exception as e:
         return False, str(e)
@@ -131,7 +138,8 @@ def convert_smiles_to_pdbqt(smiles_string, output_filename="ligand.pdbqt"):
         temp_pdb = "temp_ligand.pdb"
         Chem.MolToPDBFile(mol, temp_pdb)
         
-        convert_pdb_to_pdbqt(temp_pdb, output_filename)
+        # Call converter with is_ligand=True to activate ROOT/ENDROOT wrapping
+        convert_pdb_to_pdbqt(temp_pdb, output_filename, is_ligand=True)
         
         if os.path.exists(temp_pdb):
             os.remove(temp_pdb)
@@ -181,7 +189,7 @@ with col_params:
             fetch_success, pdb_file_path = fetch_pdb_from_rcsb(pdb_id_input)
             if fetch_success:
                 st.success(f"Successfully downloaded structural file: {pdb_file_path}")
-                conv_success, err_msg = convert_pdb_to_pdbqt(pdb_file_path, prepared_receptor_path)
+                conv_success, err_msg = convert_pdb_to_pdbqt(pdb_file_path, prepared_receptor_path, is_ligand=False)
                 if conv_success:
                     st.info("Structure auto-formatted into valid docking coordinates.")
                     target_ready = True
@@ -198,7 +206,7 @@ with col_params:
                 f.write(uploaded_file.getbuffer())
                 
             if uploaded_file.name.endswith(".pdb"):
-                conv_success, err_msg = convert_pdb_to_pdbqt(temp_upload_path, prepared_receptor_path)
+                conv_success, err_msg = convert_pdb_to_pdbqt(temp_upload_path, prepared_receptor_path, is_ligand=False)
                 if conv_success:
                     st.success("Uploaded standard PDB compiled down to operational format.")
                     target_ready = True
