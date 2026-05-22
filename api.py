@@ -38,8 +38,8 @@ def fetch_pdb_from_rcsb(pdb_id):
 
 def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt"):
     """
-    Parses a standard PDB structural file and builds a compliant PDBQT format.
-    Splits by token properties instead of hard slices to guarantee columns never bleed.
+    Parses a standard PDB structural file and builds a compliant PDBQT format
+    by applying the strict official column constraints expected by Vina.
     """
     try:
         with open(input_pdb, "r") as pdb, open(output_pdbqt, "w") as pdbqt:
@@ -49,46 +49,61 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt"):
                     if len(parts) < 6:
                         continue
                         
-                    # Standard structural identification parameters
-                    record_type = parts[0]      # ATOM or HETATM
-                    atom_id = parts[1]          # Serial Identification
-                    atom_name = parts[2]        # Chemical name designation
-                    res_name = parts[3]         # Residue configuration type
-                    
-                    # Manage optional single-character Chain Identifiers
-                    if len(parts[4]) == 1 and not parts[4].isdigit():
-                        chain_id = parts[4]
-                        res_seq = parts[5]
-                        coord_idx = 6
-                    else:
-                        chain_id = "A"              # Default placeholder
-                        res_seq = parts[4]
-                        coord_idx = 5
-                        
-                    # Extract 3D Orthogonal coordinates accurately
+                    # Standard token mapping
+                    record_type = line[:6].strip()  # ATOM or HETATM
                     try:
-                        x = float(parts[coord_idx])
-                        y = float(parts[coord_idx+1])
-                        z = float(parts[coord_idx+2])
-                    except (IndexError, ValueError):
-                        continue # Skip corrupted coordinate rows
+                        atom_id = int(line[6:11].strip())
+                    except ValueError:
+                        atom_id = 1
                         
-                    # Determine target atom-type classification
-                    element = parts[-1] if parts[-1].isalpha() else atom_name[0]
+                    atom_name = line[12:16]          # Keep original 4-char padding spacing
+                    res_name = line[17:20].strip()
+                    chain_id = line[21].strip()
+                    if not chain_id:
+                        chain_id = "A"
+                        
+                    try:
+                        res_seq = int(line[22:26].strip())
+                    except ValueError:
+                        res_seq = 1
+                        
+                    # Safely parse the core coordinate blocks via explicit column indices
+                    try:
+                        x = float(line[30:38].strip())
+                        y = float(line[38:46].strip())
+                        z = float(line[46:54].strip())
+                    except ValueError:
+                        # Fallback row processing if file formatting has custom alterations
+                        continue
+                        
+                    # Determine element types cleanly
+                    element = line[76:78].strip()
+                    if not element:
+                        element = ''.join([c for c in atom_name if c.isalpha()])[0]
                     element = ''.join([c for c in element if c.isalpha()]).upper()
                     if not element:
                         element = "C"
                         
                     if element == "C" and "AR" in atom_name.upper():
-                        element = "A" # Assign Aromatic Carbon tag for Vina matrix
-                        
-                    # Assemble records into strict PDBQT character columns layout
-                    # Format layout assignments match structural spec definitions:
-                    # coords down to column 54, occupancy/temp to 66, charge space to 76, element at 78
+                        element = "A" # Aromatic Carbon assignment
+
+                    # Build the line using standard character width templates:
+                    # %-6s : ATOM/HETATM (cols 1-6)
+                    # %5d  : Atom serial index (cols 7-11)
+                    #  %-4s: Atom name placeholder with spacing buffer (cols 13-16)
+                    # %3s  : Residue identifier name (cols 17-20)
+                    #  %1s : Chain assignment (col 22)
+                    # %4d  : Residue sequence coordinate index (cols 23-26)
+                    # %8.3f: X, Y, Z coordinate metrics (cols 31-54)
+                    # %6.2f: Occupancy factor (cols 55-60)
+                    # %6.2f: Temp B-Factor scale (cols 61-66)
+                    # %10s : Charge space string formatting (cols 67-76)
+                    #  %-2s: AutoDock element flag type assignment (cols 78-79)
                     pdbqt_line = (
-                        f"{record_type:<6}{int(atom_id):>5} {atom_name:<4} {res_name:<3} "
-                        f"{chain_id}{int(res_seq):>4}    "
-                        f"{x:>8.3f}{y:>8.3f}{z:>8.3f}  1.00  0.00       +0.000 {element:<2}\n"
+                        f"{record_type:<6}{atom_id:>5} {atom_name:<4} {res_name:>3} "
+                        f"{chain_id}{res_seq:>4}    "
+                        f"{x:>8.3f}{y:>8.3f}{z:>8.3f}{1.00:>6.2f}{0.00:>6.2f}    "
+                        f"+0.000 {element:<2}\n"
                     )
                     pdbqt.write(pdbqt_line)
                     
@@ -103,7 +118,6 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt"):
 # --- LIGAND MOLECULAR GENERATION ---
 
 def convert_smiles_to_pdbqt(smiles_string, output_filename="ligand.pdbqt"):
-    """Converts SMILES parameters to fully structured 3D PDBQT strings."""
     try:
         mol = Chem.MolFromSmiles(smiles_string)
         if mol is None:
@@ -118,7 +132,6 @@ def convert_smiles_to_pdbqt(smiles_string, output_filename="ligand.pdbqt"):
         temp_pdb = "temp_ligand.pdb"
         Chem.MolToPDBFile(mol, temp_pdb)
         
-        # Parse the temporary file to rewrite structural records down cleanly
         convert_pdb_to_pdbqt(temp_pdb, output_filename)
         
         if os.path.exists(temp_pdb):
