@@ -428,16 +428,18 @@ with col_params:
             
     elif ligand_source == "Upload Structural File (.pdb, .sdf)" and uploaded_lig_buffer is not None:
         temp_in = f"raw_ligand_{uploaded_lig_name}"
-        with open(temp_in, "wb") as f: 
+        with open(temp_in, "wb") as f:
             f.write(uploaded_lig_buffer.getbuffer())
         
+        # Load molecule
         mol = Chem.MolFromPDBFile(temp_in, removeHs=False) if uploaded_lig_name.endswith(".pdb") else Chem.SDMolSupplier(temp_in, removeHs=False)[0]
         
         if mol:
             try:
                 Chem.SanitizeMol(mol)
                 AllChem.AssignBondOrdersFromTopology(mol)
-            except Exception: pass
+            except Exception:
+                pass
             
             if mol.GetNumConformers() == 0:
                 mol = Chem.AddHs(mol)
@@ -450,13 +452,14 @@ with col_params:
             
             st.session_state.ligand_ready = True
             st.session_state.smiles_cache = temp_in
-            with open("ligand.pdbqt", "r") as f: 
+            with open("ligand.pdbqt", "r") as f:
                 st.session_state.serialized_ligand_block = f.read()
             
-            st.session_state.ligand_summary_text = "Ligand structure loaded successfully."
-            
-            if os.path.exists(temp_in): os.remove(temp_in)
-            if os.path.exists(temp_pdb): os.remove(temp_pdb)
+            if os.path.exists(temp_in):
+                os.remove(temp_in)
+            if os.path.exists(temp_pdb):
+                os.remove(temp_pdb)
+                
             st.success("Structural file loaded and ready for docking!")
             
             temp_pdb = "temp_lig_state.pdb"
