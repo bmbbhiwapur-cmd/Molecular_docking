@@ -270,30 +270,6 @@ def generate_2d_ligand_img(mol):
         return base64.b64encode(buf.getvalue()).decode('utf-8')
     except Exception: return None
 
-def generate_ligplot_interaction_img(mol, interactions_list):
-    if mol is None: return None
-    try:
-        mol_flat = Chem.Mol(mol)
-        Chem.SanitizeMol(mol_flat)
-        AllChem.Compute2DCoords(mol_flat)
-        highlight_atoms = []
-        highlight_labels = {}
-        num_atoms = mol_flat.GetNumAtoms()
-        for idx, interact in enumerate(interactions_list):
-            atom_idx = idx % num_atoms
-            highlight_atoms.append(atom_idx)
-            highlight_labels[atom_idx] = interact["Residue Contact"]
-        d2d = Draw.MolDraw2DCairo(450, 350)
-        dos = d2d.drawOptions()
-        dos.legendFontSize = 12
-        dos.annotationFontScale = 0.80
-        for at_idx, label in highlight_labels.items():
-            mol_flat.GetAtomWithIdx(at_idx).SetProp("atomNote", label)
-        d2d.DrawMolecule(mol_flat, highlightAtoms=highlight_atoms)
-        d2d.FinishDrawing()
-        return base64.b64encode(d2d.GetDrawingText()).decode('utf-8')
-    except Exception: return None
-
 def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon", show_surface=False, interactions_list=[]):
     surface_js = "viewer.addSurface($3Dmol.SurfaceType.VDW, {opacity:0.45, colorscheme:{prop:'b',gradient:'rwb'}}, {model:0});" if show_surface else ""
     int_lines_js = ""
@@ -538,7 +514,6 @@ with col_visual:
             pose_affinity_score = get_pose_affinity(st.session_state.docking_results_raw, selected_pose)
             active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
             
-            # CRITICAL CONVERSION FIX: Replaced st.markdown with st.html to prevent curly brace compiler leak errors
             html_metric_card = """
             <div style="background-color:#f0f7f4; border-left:6px solid #2e7d32; padding:15px; border-radius:6px; margin-bottom:15px; font-family:sans-serif;">
                 <span style="font-size:14px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Active Pose Affinity</span><br>
@@ -555,14 +530,6 @@ with col_visual:
                 
             render_advanced_modeling_blueprint(receptor_data=protein_data, ligand_data=parsed_poses[selected_pose], mode=style_mode, show_surface=surf_toggle, interactions_list=active_interactions)
             
-            st.subheader("🖼 2D LigPlot-Style Interaction Diagram Map")
-            try:
-                m_native = Chem.MolFromPDBFile(st.session_state.smiles_cache, removeHs=True) if "raw_ligand" in st.session_state.smiles_cache else Chem.MolFromSmiles(st.session_state.smiles_cache)
-                if m_native:
-                    ligplot_b64 = generate_ligplot_interaction_img(m_native, active_interactions)
-                    if ligplot_b64: st.markdown('<div style="text-align:center; background: #ffffff; padding:12px; border-radius:8px; border:1px solid #ddd;"><img src="data:image/png;base64,{}"/></div>'.format(ligplot_b64), unsafe_html=True)
-            except Exception: pass
-
             st.subheader("🧬 Local Contact Residues & Bond Assignments Matrix")
             if active_interactions:
                 df_int = pd.DataFrame(active_interactions)
