@@ -71,7 +71,6 @@ def parse_bound_ligands(file_path):
                 try: res_seq = int(line[22:26].strip())
                 except ValueError: continue
                 
-                # Exclude standard crystallographic solvent water molecules
                 if res_name in ["HOH", "WAT", "DOD"]: continue
                 
                 key = f"{res_name}-{chain_id}-{res_seq}"
@@ -89,14 +88,12 @@ def parse_bound_ligands(file_path):
     for key, info in ligands.items():
         pts = info["coords"]
         n_atoms = len(pts)
-        if n_atoms < 4: continue  # Filter out standalone buffer ions (e.g. Cl, Mg)
+        if n_atoms < 4: continue  # Filter out buffer ions
         
-        # Calculate geometric bounding center
         cx = sum([p[0] for p in pts]) / n_atoms
         cy = sum([p[1] for p in pts]) / n_atoms
         cz = sum([p[2] for p in pts]) / n_atoms
         
-        # Determine appropriate search space boundaries based on atom distances
         bx = max([p[0] for p in pts]) - min([p[0] for p in pts]) + 10.0
         by = max([p[1] for p in pts]) - min([p[1] for p in pts]) + 10.0
         bz = max([p[2] for p in pts]) - min([p[2] for p in pts]) + 10.0
@@ -110,6 +107,16 @@ def parse_bound_ligands(file_path):
 
 
 # --- CHEMINFORMATICS COORDINATE PARSERS ---
+
+def fetch_pdb_from_rcsb(pdb_id):
+    pdb_id = pdb_id.strip().lower()
+    url = f"https://files.rcsb.org/download/{pdb_id}.pdb"
+    local_pdb = f"{pdb_id}.pdb"
+    try:
+        urllib.request.urlretrieve(url, local_pdb)
+        return True, local_pdb
+    except Exception:
+        return False, f"Could not find or download PDB ID '{pdb_id.upper()}'."
 
 def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=False):
     autodock_type_map = {
@@ -166,7 +173,6 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=Fals
         return False, str(e)
 
 def process_uploaded_ligand(file_buffer, filename):
-    """Processes uploaded small-molecule files across PDB/SDF formats into 3D environments."""
     try:
         temp_in = f"raw_ligand_{filename}"
         with open(temp_in, "wb") as f: f.write(file_buffer.getbuffer())
@@ -176,11 +182,10 @@ def process_uploaded_ligand(file_buffer, filename):
         elif filename.endswith(".sdf"):
             suppl = Chem.SDMolSupplier(temp_in, removeHs=False)
             mol = suppl[0] if suppl else None
-        else: return False, None, "Unsupported structural file layout format."
+        else: return False, None, "Unsupported file format."
         
-        if mol is None: return False, None, "RDKit structure parsing execution trace failed."
+        if mol is None: return False, None, "RDKit parsing failed."
         
-        # Embed and optimize 3D conformations if source coordinates are flat
         if mol.GetNumConformers() == 0:
             mol = Chem.AddHs(mol)
             AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
@@ -190,10 +195,9 @@ def process_uploaded_ligand(file_buffer, filename):
         Chem.MolToPDBFile(mol, temp_pdb)
         convert_pdb_to_pdbqt(temp_pdb, "ligand.pdbqt", is_ligand=True)
         
-        # Extract metadata metrics
         chem_formula = Chem.rdmolops.CalcMolFormula(mol)
         mw = round(Chem.Descriptors.MolWt(mol), 2)
-        summary = f"Formula: {chem_formula} | Molecular Weight: {mw} g/mol | Rotatable Bonds: {AllChem.CalcNumRotatableBonds(mol)}"
+        summary = f"Formula: {chem_formula} | MW: {mw} g/mol | Rotatable Bonds: {AllChem.CalcNumRotatableBonds(mol)}"
         
         if os.path.exists(temp_in): os.remove(temp_in)
         if os.path.exists(temp_pdb): os.remove(temp_pdb)
@@ -201,10 +205,9 @@ def process_uploaded_ligand(file_buffer, filename):
     except Exception as e: return False, None, str(e)
 
 
-# --- RENDER ENGRAVING IMAGES BLOCK ---
+# --- VISUALIZATION LAYERS ---
 
 def generate_2d_ligand_img(mol):
-    """Generates a base64 encoded chemical image to embed directly inline into data layouts."""
     try:
         img = Draw.MolToImage(mol, size=(320, 240))
         import io
@@ -229,7 +232,7 @@ def render_complex_html(receptor_pdbqt, ligand_pdbqt=None):
     components.html(html_content, height=390)
 
 
-# --- PARSING PARAMS LOGS ---
+# --- DATA LOG ENGINE ---
 
 def parse_vina_output_text(stdout_text):
     data = []
@@ -270,9 +273,12 @@ if "sx" not in st.session_state: st.session_state.sx = 20
 if "sy" not in st.session_state: st.session_state.sy = 20
 if "sz" not in st.session_state: st.session_state.sz = 20
 if "docking_results_raw" not in st.session_state: st.session_state.docking_results_raw = None
+if "target_ready" not in st.session_state: st.session_state.target_ready = False
+if "local_target_path" not in st.session_state: st.session_state.local_target_path = None
+if "pdb_id_display" not in st.session_state: st.session_state.pdb_id_display = "Custom"
 
 col_params, col_visual = st.columns([1, 1])
-target_ready, ligand_ready = False, False
+ligand_ready = False
 prepared_receptor_path = "protein.pdbqt"
 active_ligand_mol = None
 ligand_summary_text = ""
@@ -281,23 +287,37 @@ with col_params:
     st.header("1. Target Protein Setup")
     protein_source = st.radio("Choose Protein Input Method:", ["Type 4-Letter PDB ID", "Upload File (.pdb or .pdbqt)"])
     
-    pdb_file_target = None
     if protein_source == "Type 4-Letter PDB ID":
         pdb_id_input = st.text_input("Enter RCSB PDB ID", value="2AMB").strip()
-        if pdb_id_input:
-            fetch_success, pdb_file_target = fetch_pdb_from_rcsb(pdb_id_input)
-            if fetch_success: target_ready, _ = convert_pdb_to_pdbqt(pdb_file_target, prepared_receptor_path)
+        if st.button("📥 Load Target Structure"):
+            if pdb_id_input:
+                success, path = fetch_pdb_from_rcsb(pdb_id_input)
+                if success:
+                    st.session_state.local_target_path = path
+                    st.session_state.pdb_id_display = pdb_id_input
+                    conv_ok, _ = convert_pdb_to_pdbqt(path, prepared_receptor_path)
+                    st.session_state.target_ready = conv_ok
+                    if conv_ok: st.success(f"Protein {pdb_id_input.upper()} successfully loaded and prepared!")
+                else:
+                    st.error(path)
     else:
         uploaded_file = st.file_uploader("Upload Target Protein File", type=["pdb", "pdbqt"])
         if uploaded_file:
-            pdb_file_target = f"uploaded_{uploaded_file.name}"
-            with open(pdb_file_target, "wb") as f: f.write(uploaded_file.getbuffer())
-            if uploaded_file.name.endswith(".pdb"): target_ready, _ = convert_pdb_to_pdbqt(pdb_file_target, prepared_receptor_path)
-            else: os.replace(pdb_file_target, prepared_receptor_path); target_ready = True; pdb_file_target = None
+            path = f"uploaded_{uploaded_file.name}"
+            with open(path, "wb") as f: f.write(uploaded_file.getbuffer())
+            st.session_state.local_target_path = path
+            st.session_state.pdb_id_display = "Uploaded File"
+            if uploaded_file.name.endswith(".pdb"):
+                conv_ok, _ = convert_pdb_to_pdbqt(path, prepared_receptor_path)
+                st.session_state.target_ready = conv_ok
+            else:
+                os.replace(path, prepared_receptor_path)
+                st.session_state.target_ready = True
+                st.session_state.local_target_path = None
 
-    # Render Protein Metadata Card
-    if target_ready and pdb_file_target:
-        meta = extract_pdb_metadata(pdb_file_target, pdb_id_input if protein_source == "Type 4-Letter PDB ID" else "Upload")
+    # Render Metadata Summary
+    if st.session_state.target_ready and st.session_state.local_target_path:
+        meta = extract_pdb_metadata(st.session_state.local_target_path, st.session_state.pdb_id_display)
         st.markdown(f"""
         > **Protein Summary Profile:**  
         > *   **Title:** {meta['title']}  
@@ -316,7 +336,7 @@ with col_params:
                 active_ligand_mol = Chem.MolFromSmiles(smiles_input)
                 if active_ligand_mol:
                     ligand_ready, _ = convert_smiles_to_pdbqt(smiles_input)
-                    ligand_summary_text = f"Formula: {Chem.rdmolops.CalcMolFormula(active_ligand_mol)} | Molecular Weight: {round(Chem.Descriptors.MolWt(active_ligand_mol), 2)} g/mol"
+                    ligand_summary_text = f"Formula: {Chem.rdmolops.CalcMolFormula(active_ligand_mol)} | MW: {round(Chem.Descriptors.MolWt(active_ligand_mol), 2)} g/mol"
             except Exception: pass
     else:
         uploaded_lig_file = st.file_uploader("Upload Small Molecule File", type=["pdb", "sdf"])
@@ -327,21 +347,19 @@ with col_params:
         st.markdown(f"> **Ligand Metric Summary:**  \n> {ligand_summary_text}")
 
     # --- BOUND SMALL MOLECULES INTERACTIVE PARSER PANEL ---
-    if target_ready and pdb_file_target:
-        bound_ligands_list = parse_bound_ligands(pdb_file_target)
+    if st.session_state.target_ready and st.session_state.local_target_path:
+        bound_ligands_list = parse_bound_ligands(st.session_state.local_target_path)
         if bound_ligands_list:
             st.header("3. Bound Small Molecules in Receptor")
             st.write("Co-crystallized ligands parsed from HETATM records. Select one to auto-fill the docking grid box at its native binding site.")
             
-            # Construct display table rows matching requested layout
             df_bound = pd.DataFrame(bound_ligands_list)
             df_display = df_bound.copy()
             df_display["Center (X, Y, Z) Å"] = df_display.apply(lambda r: f"{r['cx']}, {r['cy']}, {r['cz']}", axis=1)
-            df_display["Box (X, Y, Z) Å"] = df_display.apply(lambda r: f"{r['bx']}, {r['by'], r['bz']}", axis=1)
+            df_display["Box (X, Y, Z) Å"] = df_display.apply(lambda r: f"{r['bx']}, {r['by']}, {r['bz']}", axis=1)
             
             st.dataframe(df_display[["ID", "Chain", "ResSeq", "Atoms", "Center (X, Y, Z) Å", "Box (X, Y, Z) Å"]], hide_index=True, use_container_width=True)
             
-            # Dropdown choice selection to trigger grid autofill parameters
             selected_lig_id = st.selectbox(
                 "Select native co-crystal target to auto-lock parameters:",
                 options=range(len(bound_ligands_list)),
@@ -356,7 +374,8 @@ with col_params:
                 st.session_state.sx = chosen_target["bx"]
                 st.session_state.sy = chosen_target["by"]
                 st.session_state.sz = chosen_target["bz"]
-                st.success("Grid parameters aligned to match pocket bounding box dimensions!")
+                st.success("Grid parameters aligned to match pocket bounding box dimensions! Adjust sliders below if needed.")
+                st.rerun()
 
     st.header("4. Search Space Mechanics (Grid Box)")
     grid_cx = st.number_input("Center X Coordinate", value=st.session_state.cx, step=0.1)
@@ -368,7 +387,7 @@ with col_params:
     grid_sz = st.slider("Grid Box Size Z (Å)", 10, 40, int(st.session_state.sz))
     
     exhaustiveness = st.slider("Search Exhaustiveness", min_value=4, max_value=32, value=8, step=4)
-    run_btn = st.button("🚀 Initialize Docking Algorithm", type="primary", disabled=not (target_ready and ligand_ready))
+    run_btn = st.button("🚀 Initialize Docking Algorithm", type="primary", disabled=not (st.session_state.target_ready and ligand_ready))
 
 with col_visual:
     st.header("5. Active Viewport Canvas")
@@ -377,7 +396,7 @@ with col_visual:
         view_tabs = st.tabs(["3D Target Molecular Space", "2D Chemical Structure Matrix"])
         
         with view_tabs[0]:
-            if target_ready:
+            if st.session_state.target_ready:
                 with open(prepared_receptor_path, "r") as f: receptor_data = f.read()
                 ligand_data_str = None
                 if ligand_ready:
@@ -388,7 +407,7 @@ with col_visual:
             if ligand_ready and active_ligand_mol:
                 img_b64 = generate_2d_ligand_img(active_ligand_mol)
                 if img_b64: st.markdown(f'<div style="text-align:center;"><img src="data:image/png;base64,{img_b64}"/></div>', unsafe_html=True)
-                else: st.info("2D schematic view rendering unavailable for this asset style topology.")
+                else: st.info("2D schematic view rendering unavailable for this layout.")
     else:
         st.subheader("Interactive Complex Viewport")
         parsed_poses = split_docking_poses("docking_poses.pdbqt")
@@ -401,8 +420,8 @@ with col_visual:
             st.session_state.docking_results_raw = None
             st.rerun()
 
-    # --- ENGINE COMPACTION THREAD RUNNER ---
-    if run_btn and target_ready and ligand_ready:
+    # --- ENGINE COMPUTATION THREAD ---
+    if run_btn and st.session_state.target_ready and ligand_ready:
         with st.spinner("Processing flexible computational binding space matching passes..."):
             vina_command = [
                 "./vina", "--receptor", prepared_receptor_path, "--ligand", "ligand.pdbqt",
@@ -419,7 +438,7 @@ with col_visual:
             except subprocess.CalledProcessError as err:
                 st.error("Calculations exited with error flags."); st.code(err.stderr if err.stderr else err.stdout)
 
-# --- INLINE SCREENING SUB-TABLE RENDER MATRIX PANEL ---
+# --- GLOBAL DATAFRAME ANALYTICS DISPLAY ZONE ---
 if st.session_state.docking_results_raw is not None:
     st.write("---")
     st.header("📊 Screening Metrics Dashboard & Data Export")
