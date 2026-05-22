@@ -170,7 +170,7 @@ with col_params:
     st.header("2. Small Molecule Ligand Setup")
     smiles_input = st.text_input("Enter Ligand SMILES String", "CC(=O)NC1=CC=C(O)C=C1")
     
-    st.header("3. Grid Box Grid Coordinates")
+    st.header("3. Grid Box Coordinates")
     grid_cx = st.number_input("Center X Coordinate", value=15.0, step=0.1)
     grid_cy = st.number_input("Center Y Coordinate", value=50.0, step=0.1)
     grid_cz = st.number_input("Center Z Coordinate", value=15.0, step=0.1)
@@ -215,17 +215,26 @@ with col_visual:
                 "--center_x", str(grid_cx), "--center_y", str(grid_cy), "--center_z", str(grid_cz),
                 "--size_x", str(grid_sx), "--size_y", str(grid_sy), "--size_z", str(grid_sz),
                 "--exhaustiveness", str(exhaustiveness),
-                "--out", "docking_poses.pdbqt",
-                "--log", "docking_log.txt"
+                "--out", "docking_poses.pdbqt"
             ]
             
             try:
+                # Capture standard text outputs directly from system thread process execution
                 process = subprocess.run(vina_command, capture_output=True, text=True, check=True)
                 st.success("Docking processing calculations completed successfully!")
                 
-                if os.path.exists("docking_log.txt"):
-                    with open("docking_log.txt", "r") as log_file:
-                        st.text_area("Engine Scoring Log Information Output", log_file.read(), height=250)
+                # The output evaluation logs are fetched straight from standard memory stream
+                if process.stdout:
+                    st.subheader("📊 Vina Scoring Report")
+                    st.text_area(
+                        label="Binding Affinities & Structural Poses Generated", 
+                        value=process.stdout, 
+                        height=300
+                    )
+                    
+                    with open("docking_log.txt", "w") as log_file:
+                        log_file.write(process.stdout)
+                        
             except subprocess.CalledProcessError as err:
                 st.error("Calculations exited with error flags.")
-                st.code(err.stderr)
+                st.code(err.stderr if err.stderr else err.stdout)
