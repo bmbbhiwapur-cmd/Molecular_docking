@@ -32,7 +32,6 @@ ensure_linux_vina_exists()
 # --- PUBCHEM AUTOMATED DATA CONVERTER ---
 
 def fetch_ligand_data_from_pubchem(smiles_string):
-    """Queries NCBI PubChem REST API to dynamically fetch validated small molecule attributes."""
     metadata = {"name": "Unknown Compound Name", "mw": "N/A", "formula": "N/A"}
     try:
         escaped_smiles = urllib.parse.quote(smiles_string)
@@ -514,12 +513,51 @@ with col_visual:
             pose_affinity_score = get_pose_affinity(st.session_state.docking_results_raw, selected_pose)
             active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
             
+            # --- DYNAMIC AMINO ACID CLASSIFIER LOGIC ---
+            amino_acid_categories = {"Acidic (-ve)": [], "Basic (+ve)": [], "Polar (Neutral)": [], "Hydrophobic": []}
+            
+            for item in active_interactions:
+                res_full = item["Residue Contact"]
+                res_name = "".join([c for c in res_full if c.isalpha()]).upper()
+                
+                # Sort based on biochemical properties
+                if res_name in ["ASP", "GLU"]:
+                    amino_acid_categories["Acidic (-ve)"].append(res_full)
+                elif res_name in ["LYS", "ARG", "HIS"]:
+                    amino_acid_categories["Basic (+ve)"].append(res_full)
+                elif res_name in ["SER", "THR", "ASN", "GLN", "CYS", "TYR"]:
+                    amino_acid_categories["Polar (Neutral)"].append(res_full)
+                else:
+                    amino_acid_categories["Hydrophobic"].append(res_full)
+            
+            # Convert categories into a clean summary layout string
+            breakdown_html = ""
+            for cat_name, res_list in amino_acid_categories.items():
+                if res_list:
+                    labels_joined = ", ".join(list(set(res_list)))
+                    breakdown_html += f"<p style='margin:4px 0; font-size:13px;'><b>{cat_name}:</b> <span style='color:#333;'>{labels_joined}</span></p>"
+            if not breakdown_html:
+                breakdown_html = "<p style='margin:4px 0; color:#777; font-size:13px;'>No direct pocket interactions detected.</p>"
+
+            # --- HIGH IMPACT ANALYTICS CARD WITH CATEGORY MATRIX BREAKDOWN ---
             html_metric_card = """
-            <div style="background-color:#f0f7f4; border-left:6px solid #2e7d32; padding:15px; border-radius:6px; margin-bottom:15px; font-family:sans-serif;">
-                <span style="font-size:14px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Active Pose Affinity</span><br>
-                <span style="font-size:36px; font-weight:900; color:#1b5e20;">{} <span style="font-size:18px; font-weight:normal;">kcal/mol</span></span>
+            <div style="background-color:#f0f7f4; border-left:6px solid #2e7d32; padding:16px; border-radius:8px; margin-bottom:15px; font-family:sans-serif; box-shadow:0 2px 4px rgba(0,0,0,0.02);">
+                <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #e0e8e4; padding-bottom:8px; margin-bottom:10px;">
+                    <div>
+                        <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Active Pose Affinity</span><br>
+                        <span style="font-size:36px; font-weight:900; color:#1b5e20;">{} <span style="font-size:16px; font-weight:normal;">kcal/mol</span></span>
+                    </div>
+                    <div style="text-align:right; border-left:1px solid #e0e8e4; padding-left:15px;">
+                        <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Total Contacts</span><br>
+                        <span style="font-size:32px; font-weight:800; color:#2e7d32;">{}</span>
+                    </div>
+                </div>
+                <div>
+                    <span style="font-size:11px; color:#666; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px; display:block; margin-bottom:4px;">Binding Site Amino Acid Properties Breakdown:</span>
+                    {}
+                </div>
             </div>
-            """.format(pose_affinity_score)
+            """.format(pose_affinity_score, len(active_interactions), breakdown_html)
             st.html(html_metric_card)
             
             col_render, col_mesh = st.columns([1, 1])
