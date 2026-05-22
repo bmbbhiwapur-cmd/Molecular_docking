@@ -134,6 +134,17 @@ def compute_spatial_interactions(receptor_file, ligand_pdbqt_str):
 
 # --- BIOINFORMATICS STRUCTURAL CONVERTERS ---
 
+def fetch_pdb_from_rcsb(pdb_id):
+    """Fetches a standard PDB structure directly from the RCSB server."""
+    pdb_id = pdb_id.strip().lower()
+    url = f"https://files.rcsb.org/download/{pdb_id}.pdb"
+    local_pdb = f"{pdb_id}.pdb"
+    try:
+        urllib.request.urlretrieve(url, local_pdb)
+        return True, local_pdb
+    except Exception:
+        return False, f"Could not find or download PDB ID '{pdb_id.upper()}'."
+
 def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=False):
     autodock_type_map = {"H": "H", "HD": "HD", "HS": "HS", "C": "C", "A": "A", "N": "N", "NA": "NA", "NS": "NS", "O": "O", "OA": "OA", "S": "S", "SA": "SA", "P": "P", "F": "F", "CL": "Cl", "BR": "Br", "I": "I", "ZN": "Zn", "MG": "Mg"}
     torsions = 0
@@ -377,7 +388,6 @@ with window_tabs[1]:
             m_img = Chem.MolFromPDBFile("ligand.pdbqt", removeHs=True) if "raw_ligand" in st.session_state.smiles_cache else Chem.MolFromSmiles(st.session_state.smiles_cache)
             img_b64 = generate_2d_ligand_img(m_img)
             if img_b64:
-                # FIXED: Separated HTML string execution container to bypass raw f-string brace formatting flags
                 html_raw_div = '<div style="text-align:center; background: white; padding:10px; border-radius:8px;"><img src="data:image/png;base64,{}"/></div>'.format(img_b64)
                 st.markdown(html_raw_div, unsafe_html=True)
         with col_l3d:
@@ -428,7 +438,6 @@ if st.session_state.docking_results_raw is not None:
     
     col_view3d, col_table_metrics = st.columns([1, 1])
     
-    # Simple direct log row parsing method
     def parse_vina_output_text(stdout_text):
         data = []
         pattern = re.compile(r"^\s*(\d+)\s+([-+]?\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)")
@@ -438,6 +447,22 @@ if st.session_state.docking_results_raw is not None:
                 data.append({"Binding Mode": int(match.group(1)), "Affinity (kcal/mol)": float(match.group(2)), "RMSD l.b.": float(match.group(3)), "RMSD u.b.": float(match.group(4))})
         return pd.DataFrame(data)
         
+    def split_docking_poses(poses_file_path):
+        poses = {}
+        if not os.path.exists(poses_file_path): return poses
+        current_mode, current_lines = None, []
+        with open(poses_file_path, "r") as f:
+            for line in f:
+                if line.startswith("MODEL"):
+                    try: current_mode = int(line.split()[1])
+                    except Exception: current_mode = len(poses) + 1
+                    current_lines = []
+                elif line.startswith("ENDMDL"):
+                    if current_mode is not None: poses[current_mode] = "".join(current_lines)
+                    current_mode = None
+                else: current_lines.append(line)
+        return poses
+
     parsed_poses = split_docking_poses("docking_poses.pdbqt")
     
     with col_table_metrics:
