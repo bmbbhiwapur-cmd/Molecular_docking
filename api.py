@@ -4,6 +4,8 @@ import os
 import urllib.request
 import json
 import re
+import sqlite3
+from datetime import datetime
 import numpy as np
 import pandas as pd
 from rdkit import Chem
@@ -11,6 +13,91 @@ from rdkit.Chem import AllChem
 from rdkit.Chem import Draw
 import streamlit.components.v1 as components
 import base64
+
+# --- PERSISTENT HISTORY DATABASE ENGINE MANAGEMENT ---
+
+DB_FILE = "docking_history.db"
+
+def initialize_history_database():
+    """Establishes local SQLite structural tables to securely archive screening runs."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            protein_id TEXT,
+            ligand_name TEXT,
+            grid_cx REAL,
+            grid_cy REAL,
+            grid_cz REAL,
+            grid_sx INTEGER,
+            grid_sy INTEGER,
+            grid_sz INTEGER,
+            exhaustiveness INTEGER,
+            serialized_ligand TEXT,
+            ligand_summary TEXT,
+            smiles_cache TEXT,
+            docking_results_raw TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+initialize_history_database()
+
+def save_run_to_history(protein_id, ligand_name, cx, cy, cz, sx, sy, sz, exhaustiveness, serialized_ligand, ligand_summary, smiles_cache, results_raw):
+    """Inserts a completed calculation pass profile row safely into SQLite memory matrix."""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute("""
+            INSERT INTO runs (
+                timestamp, protein_id, ligand_name, grid_cx, grid_cy, grid_cz, 
+                grid_sx, grid_sy, grid_sz, exhaustiveness, serialized_ligand, 
+                ligand_summary, smiles_cache, docking_results_raw
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            now_str, protein_id, ligand_name, float(cx), float(cy), float(cz),
+            int(sx), int(sy), int(sz), int(exhaustiveness), serialized_ligand,
+            ligand_summary, smiles_cache, results_raw
+        ))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        st.error(f"Database logging failure: {e}")
+        return False
+
+def fetch_all_history_records():
+    """Extracts summary index parameters to populate selection filters."""
+    if not os.path.exists(DB_FILE):
+        return []
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, timestamp, protein_id, ligand_name FROM runs ORDER BY id DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+def fetch_single_run_details(run_id):
+    """Pulls whole operational profile data blocks to auto-hydrate session states."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM runs WHERE id = ?", (run_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        # Map table fields structural keys directly
+        return {
+            "timestamp": row[1], "protein_id": row[2], "ligand_name": row[3],
+            "cx": row[4], "cy": row[5], "cz": row[6], "sx": row[7], "sy": row[8], "sz": row[9],
+            "exhaustiveness": row[10], "serialized_ligand": row[11], "ligand_summary": row[12],
+            "smiles_cache": row[13], "results_raw": row[14]
+        }
+    return None
+
 
 # --- CLOUD CONTEXT ENGINE MANAGEMENT ---
 
@@ -36,7 +123,6 @@ def fetch_ligand_data_from_pubchem(smiles_string):
     try:
         escaped_smiles = urllib.parse.quote(smiles_string)
         url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles/{escaped_smiles}/property/Title,MolecularWeight,MolecularFormula/JSON"
-        
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req, timeout=8) as response:
             res_data = json.loads(response.read().decode())
@@ -77,7 +163,6 @@ def extract_pdb_metadata(file_path, pdb_id="Custom"):
 def parse_bound_ligands(file_path):
     ligands = {}
     if not os.path.exists(file_path): return ligands
-    
     with open(file_path, "r") as f:
         for line in f:
             if line.startswith("HETATM"):
@@ -86,34 +171,21 @@ def parse_bound_ligands(file_path):
                 try: res_seq = int(line[22:26].strip())
                 except ValueError: continue
                 if res_name in ["HOH", "WAT", "DOD"]: continue
-                
                 key = f"{res_name}-{chain_id}-{res_seq}"
-                try:
-                    x = float(line[30:38].strip())
-                    y = float(line[38:46].strip())
-                    z = float(line[46:54].strip())
+                try: x, y, z = float(line[30:38].strip()), float(line[38:46].strip()), float(line[46:54].strip())
                 except ValueError: continue
-                
-                if key not in ligands:
-                    ligands[key] = {"res": res_name, "chain": chain_id, "seq": res_seq, "coords": []}
+                if key not in ligands: ligands[key] = {"res": res_name, "chain": chain_id, "seq": res_seq, "coords": []}
                 ligands[key]["coords"].append((x, y, z))
-                
     processed_ligands = []
     for key, info in ligands.items():
         pts = info["coords"]
         n_atoms = len(pts)
         if n_atoms < 4: continue
-        
         cx, cy, cz = sum([p[0] for p in pts])/n_atoms, sum([p[1] for p in pts])/n_atoms, sum([p[2] for p in pts])/n_atoms
         bx = max([p[0] for p in pts]) - min([p[0] for p in pts]) + 10.0
         by = max([p[1] for p in pts]) - min([p[1] for p in pts]) + 10.0
         bz = max([p[2] for p in pts]) - min([p[2] for p in pts]) + 10.0
-        
-        processed_ligands.append({
-            "ID": info["res"], "Chain": info["chain"], "ResSeq": info["seq"], "Atoms": n_atoms,
-            "cx": round(cx, 2), "cy": round(cy, 2), "cz": round(cz, 2),
-            "bx": round(bx, 1), "by": round(by, 1), "bz": round(bz, 1)
-        })
+        processed_ligands.append({"ID": info["res"], "Chain": info["chain"], "ResSeq": info["seq"], "Atoms": n_atoms, "cx": round(cx, 2), "cy": round(cy, 2), "cz": round(cz, 2), "bx": round(bx, 1), "by": round(by, 1), "bz": round(bz, 1)})
     return processed_ligands
 
 
@@ -137,11 +209,8 @@ def parse_pdbqt_coordinates(pdbqt_string):
 def compute_spatial_interactions(receptor_file, ligand_pdbqt_str):
     interactions = []
     if not os.path.exists(receptor_file): return interactions
-    
-    with open(receptor_file, "r") as f:
-         receptor_atoms = parse_pdbqt_coordinates(f.read())
+    with open(receptor_file, "r") as f: receptor_atoms = parse_pdbqt_coordinates(f.read())
     ligand_atoms = parse_pdbqt_coordinates(ligand_pdbqt_str)
-    
     seen = set()
     for l_at in ligand_atoms:
         for r_at in receptor_atoms:
@@ -149,22 +218,14 @@ def compute_spatial_interactions(receptor_file, ligand_pdbqt_str):
             if dist < 3.8: 
                 res_id = r_at["res"]
                 if res_id in seen: continue
-                
                 if l_at["element"] in ["N", "O", "F", "S"] and r_at["element"] in ["N", "O", "F", "S"]:
                     b_type = "Hydrogen Bond"
                 elif "A" in r_at["element"] or (l_at["element"] == "C" and r_at["element"] == "C" and any(aro in r_at["res"] for aro in ["PHE", "TYR", "TRP"])):
                     b_type = "pi-Stacking / Hydrophobic"
                 else:
                     b_type = "van der Waals Contact"
-                    
                 seen.add(res_id)
-                interactions.append({
-                    "Residue Contact": res_id,
-                    "Interaction Type": b_type,
-                    "Distance (Å)": round(dist, 2),
-                    "r_coord": r_at["coord"].tolist(),
-                    "l_coord": l_at["coord"].tolist()
-                })
+                interactions.append({"Residue Contact": res_id, "Interaction Type": b_type, "Distance (Å)": round(dist, 2), "r_coord": r_at["coord"].tolist(), "l_coord": l_at["coord"].tolist()})
     return interactions
 
 
@@ -181,11 +242,7 @@ def fetch_pdb_from_rcsb(pdb_id):
         return False, f"Could not find or download PDB ID '{pdb_id.upper()}'."
 
 def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=False):
-    autodock_type_map = {
-        "H": "H", "HD": "HD", "HS": "HS", "C": "C", "A": "A", "N": "N", "NA": "NA", 
-        "NS": "NS", "O": "O", "OA": "OA", "S": "S", "SA": "SA", "P": "P", "F": "F", 
-        "CL": "Cl", "BR": "Br", "I": "I", "ZN": "Zn", "MG": "Mg"
-    }
+    autodock_type_map = {"H": "H", "HD": "HD", "HS": "HS", "C": "C", "A": "A", "N": "N", "NA": "NA", "NS": "NS", "O": "O", "OA": "OA", "S": "S", "SA": "SA", "P": "P", "F": "F", "CL": "Cl", "BR": "Br", "I": "I", "ZN": "Zn", "MG": "Mg"}
     torsions = 0
     if is_ligand:
         try:
@@ -233,25 +290,6 @@ def convert_smiles_to_pdbqt(smiles_string, output_filename="ligand.pdbqt"):
         if os.path.exists(temp_pdb): os.remove(temp_pdb)
         return True, output_filename
     except Exception as e: return False, str(e)
-
-
-# --- LOG FILE PARSERS ---
-
-def split_docking_poses(poses_file_path):
-    poses = {}
-    if not os.path.exists(poses_file_path): return poses
-    current_mode, current_lines = None, []
-    with open(poses_file_path, "r") as f:
-        for line in f:
-            if line.startswith("MODEL"):
-                try: current_mode = int(line.split()[1])
-                except Exception: current_mode = len(poses) + 1
-                current_lines = []
-            elif line.startswith("ENDMDL"):
-                if current_mode is not None: poses[current_mode] = "".join(current_lines)
-                current_mode = None
-            else: current_lines.append(line)
-    return poses
 
 
 # --- HIGH PERFORMANCE VISUALIZATION CONSTRUCTS ---
@@ -317,11 +355,12 @@ def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon
     components.html(html_content, height=510)
 
 
-# --- APPLICATION DASHBOARD WORKSPACE ---
+# --- APPLICATION DASHBOARD INTERFACE WORKSPACE ---
 
 st.set_page_config(page_title="In Silico Docking Hub", layout="wide")
 st.title("🔬 Automated Molecular Docking Studio")
 
+# Initialize persistent memory parameters safely
 if "cx" not in st.session_state: st.session_state.cx = 0.0
 if "cy" not in st.session_state: st.session_state.cy = 0.0
 if "cz" not in st.session_state: st.session_state.cz = 0.0
@@ -336,6 +375,42 @@ if "docking_results_raw" not in st.session_state: st.session_state.docking_resul
 if "serialized_ligand_block" not in st.session_state: st.session_state.serialized_ligand_block = None
 if "ligand_summary_text" not in st.session_state: st.session_state.ligand_summary_text = ""
 if "smiles_cache" not in st.session_state: st.session_state.smiles_cache = ""
+
+# --- SIDEBAR DATABASE LIGAND DOCKING HISTORY MATRIX ---
+st.sidebar.header("📁 Docking Run History Matrix")
+history_records = fetch_all_history_records()
+
+if history_records:
+    history_options = {f"Run #{r[0]} | Prot: {r[2]} | Lig: {r[3][:15]}... [{r[1]}]": r[0] for r in history_records}
+    selected_history_label = st.sidebar.selectbox("Select Previous Run to Auto-Populate:", ["-- Active Workspace --"] + list(history_options.keys()))
+    
+    if selected_history_label != "-- Active Workspace --":
+        selected_run_id = history_options[selected_history_label]
+        run_data = fetch_single_run_details(selected_run_id)
+        
+        if run_data:
+            # Rehydrate the exact parameters from SQLite storage directly
+            st.session_state.cx = run_data["cx"]
+            st.session_state.cy = run_data["cy"]
+            st.session_state.cz = run_data["cz"]
+            st.session_state.sx = run_data["sx"]
+            st.session_state.sy = run_data["sy"]
+            st.session_state.sz = run_data["sz"]
+            st.session_state.exhaustiveness = run_data["exhaustiveness"]
+            st.session_state.serialized_ligand_block = run_data["serialized_ligand"]
+            st.session_state.ligand_summary_text = run_data["ligand_summary"]
+            st.session_state.smiles_cache = run_data["smiles_cache"]
+            st.session_state.docking_results_raw = run_data["results_raw"]
+            
+            # Reconstruct background system files to prevent loading loop errors
+            st.session_state.target_ready = True
+            st.session_state.ligand_ready = True
+            st.session_state.pdb_id_display = run_data["protein_id"]
+            
+            with open("ligand.pdbqt", "w") as f: f.write(run_data["serialized_ligand"])
+            st.sidebar.success(f"Loaded Run #{selected_run_id} completely!")
+else:
+    st.sidebar.info("No saved computational runs discovered inside the database matrix yet.")
 
 col_params, col_visual = st.columns([1, 1])
 
@@ -513,39 +588,28 @@ with col_visual:
             pose_affinity_score = get_pose_affinity(st.session_state.docking_results_raw, selected_pose)
             active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
             
-            # --- DYNAMIC AMINO ACID CLASSIFIER LOGIC ---
             amino_acid_categories = {"Acidic (-ve)": [], "Basic (+ve)": [], "Polar (Neutral)": [], "Hydrophobic": []}
-            
             for item in active_interactions:
                 res_full = item["Residue Contact"]
                 res_name = "".join([c for c in res_full if c.isalpha()]).upper()
-                
-                # Sort based on biochemical properties
-                if res_name in ["ASP", "GLU"]:
-                    amino_acid_categories["Acidic (-ve)"].append(res_full)
-                elif res_name in ["LYS", "ARG", "HIS"]:
-                    amino_acid_categories["Basic (+ve)"].append(res_full)
-                elif res_name in ["SER", "THR", "ASN", "GLN", "CYS", "TYR"]:
-                    amino_acid_categories["Polar (Neutral)"].append(res_full)
-                else:
-                    amino_acid_categories["Hydrophobic"].append(res_full)
+                if res_name in ["ASP", "GLU"]: amino_acid_categories["Acidic (-ve)"].append(res_full)
+                elif res_name in ["LYS", "ARG", "HIS"]: amino_acid_categories["Basic (+ve)"].append(res_full)
+                elif res_name in ["SER", "THR", "ASN", "GLN", "CYS", "TYR"]: amino_acid_categories["Polar (Neutral)"].append(res_full)
+                else: amino_acid_categories["Hydrophobic"].append(res_full)
             
-            # Convert categories into a clean summary layout string
             breakdown_html = ""
             for cat_name, res_list in amino_acid_categories.items():
                 if res_list:
                     labels_joined = ", ".join(list(set(res_list)))
                     breakdown_html += f"<p style='margin:4px 0; font-size:13px;'><b>{cat_name}:</b> <span style='color:#333;'>{labels_joined}</span></p>"
-            if not breakdown_html:
-                breakdown_html = "<p style='margin:4px 0; color:#777; font-size:13px;'>No direct pocket interactions detected.</p>"
+            if not breakdown_html: breakdown_html = "<p style='margin:4px 0; color:#777; font-size:13px;'>No pocket interactions detected.</p>"
 
-            # --- HIGH IMPACT ANALYTICS CARD WITH CATEGORY MATRIX BREAKDOWN ---
             html_metric_card = """
-            <div style="background-color:#f0f7f4; border-left:6px solid #2e7d32; padding:16px; border-radius:8px; margin-bottom:15px; font-family:sans-serif; box-shadow:0 2px 4px rgba(0,0,0,0.02);">
+            <div style="background-color:#f0f7f4; border-left:6px solid #2e7d32; padding:16px; border-radius:8px; margin-bottom:15px; font-family:sans-serif;">
                 <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #e0e8e4; padding-bottom:8px; margin-bottom:10px;">
                     <div>
                         <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Active Pose Affinity</span><br>
-                        <span style="font-size:36px; font-weight:900; color:#1b5e20;">{} <span style="font-size:16px; font-weight:normal;">kcal/mol</span></span>
+                        <span style="font-size:36px; font-weight:900; color:#1b5e20;">{} <span style="font-size:18px; font-weight:normal;">kcal/mol</span></span>
                     </div>
                     <div style="text-align:right; border-left:1px solid #e0e8e4; padding-left:15px;">
                         <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Total Contacts</span><br>
@@ -587,7 +651,26 @@ with col_visual:
                 process = subprocess.run(vina_command, capture_output=True, text=True, check=True)
                 if process.stdout:
                     st.session_state.docking_results_raw = process.stdout
-                    st.success("Calculations complete!")
+                    
+                    # EXTRACT LIGAND UNIQUE IDENTIFIER FROM CACHED FIELDS FOR INDEX ARCHIVING
+                    lig_id_text = "Compound"
+                    if "SMILES" in ligand_source: lig_id_text = smiles_input_val[:12]
+                    elif uploaded_lig_name: lig_id_text = uploaded_lig_name
+                    
+                    # COMMIT FULL SESSION ARCHIVE DIRECTLY TO DATABASE MATRIX
+                    save_run_to_history(
+                        protein_id=st.session_state.pdb_id_display,
+                        ligand_name=lig_id_text,
+                        cx=grid_cx, cy=grid_cy, cz=grid_cz,
+                        sx=grid_sx, sy=grid_sy, sz=grid_sz,
+                        exhaustiveness=exhaustiveness,
+                        serialized_ligand=st.session_state.serialized_ligand_block,
+                        ligand_summary=st.session_state.ligand_summary_text,
+                        smiles_cache=st.session_state.smiles_cache,
+                        results_raw=process.stdout
+                    )
+                    
+                    st.success("Calculations complete and saved to historical database logs!")
                     st.rerun()
             except subprocess.CalledProcessError as err: st.error("Calculations exited with error flags."); st.code(err.stderr if err.stderr else err.stdout)
 
