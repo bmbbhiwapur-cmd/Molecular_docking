@@ -2,6 +2,8 @@ import streamlit as st
 import subprocess
 import os
 import urllib.request
+import re
+import pandas as pd
 from rdkit import Chem
 from rdkit.Chem import AllChem
 import streamlit.components.v1 as components
@@ -23,7 +25,63 @@ def ensure_linux_vina_exists():
 ensure_linux_vina_exists()
 
 
-# --- REAL-TIME PROTEIN COUPLING & AUTO-CENTERING ---
+# --- PARSING UTILITIES FOR RESULTS & POSES ---
+
+def parse_vina_output_text(stdout_text):
+    """
+    Parses the text output table directly from Vina's stdout 
+    and converts it into a clean, structured Pandas DataFrame.
+    """
+    data = []
+    # Regular expression pattern to capture rows like: "   1         -7.4      0.000      0.000"
+    pattern = re.compile(r"^\s*(\d+)\s+([-+]?\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)")
+    
+    for line in stdout_text.split("\n"):
+        match = pattern.match(line)
+        if match:
+            mode = int(match.group(1))
+            affinity = float(match.group(2))
+            rmsd_lb = float(match.group(3))
+            rmsd_ub = float(match.group(4))
+            data.append({
+                "Binding Mode": mode,
+                "Affinity (kcal/mol)": affinity,
+                "RMSD Lower Bound": rmsd_lb,
+                "RMSD Upper Bound": rmsd_ub
+            })
+    return pd.DataFrame(data)
+
+def split_docking_poses(poses_file_path):
+    """
+    Splits the multi-model docking_poses.pdbqt output file into 
+    separate individual text frames for pose-by-pose 3D visualization.
+    """
+    poses = {}
+    if not os.path.exists(poses_file_path):
+        return poses
+        
+    current_mode = None
+    current_lines = []
+    
+    with open(poses_file_path, "r") as f:
+        for line in f:
+            if line.startswith("MODEL"):
+                # Extract the index number out of the model tag
+                try:
+                    current_mode = int(line.split()[1])
+                except (IndexError, ValueError):
+                    current_mode = len(poses) + 1
+                current_lines = []
+            elif line.startswith("ENDMDL"):
+                if current_mode is not None:
+                    poses[current_mode] = "".join(current_lines)
+                current_mode = None
+            else:
+                current_lines.append(line)
+    return poses
+
+
+# --- REAL-TIME PROTEIN STRUCTURE FETCHING & CONVERSION ---
 
 def fetch_pdb_from_rcsb(pdb_id):
     pdb_id = pdb_id.strip().lower()
@@ -36,7 +94,6 @@ def fetch_pdb_from_rcsb(pdb_id):
         return False, f"Could not find or download PDB ID '{pdb_id.upper()}'."
 
 def calculate_protein_center(input_pdb):
-    """Calculates the geometric center of the protein coordinates to prevent empty grid errors."""
     x_coords, y_coords, z_coords = [], [], []
     try:
         with open(input_pdb, "r") as f:
@@ -65,13 +122,12 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=Fals
     }
     torsions = 0
     if is_ligand:
-        # Programmatically count actual rotatable single bonds using RDKit if available
         try:
             mol = Chem.MolFromPDBFile(input_pdb, removeHs=False)
             if mol:
                 torsions = AllChem.CalcNumRotatableBonds(mol)
         except Exception:
-            torsions = 4 # Smart fallback guess if parsing struggles
+            torsions = 4
 
     try:
         with open(input_pdb, "r") as pdb, open(output_pdbqt, "w") as pdbqt:
@@ -154,21 +210,30 @@ def convert_smiles_to_pdbqt(smiles_string, output_filename="ligand.pdbqt"):
         return False, str(e)
 
 
-# --- PY3DMOL ENGINE VIEWPORT INTERFACE ---
+# --- ADVANCED PY3DMOL VIEWPORT (COMPLEX INTERACTION RENDERER) ---
 
-def render_molecule_html(pdb_string, style_type="stick", scheme="cyanCarbon"):
+def render_complex_html(receptor_pdbqt, ligand_pdbqt=None):
+    """Generates an iframe script rendering both target ribbon structures and sticks."""
+    ligand_block = f"viewer.addModel(`{ligand_pdbqt}`, 'pdb'); viewer.setStyle({{model: 1}}, {{stick: {{colorscheme: 'cyanCarbon', radius: 0.25}}}});" if ligand_pdbqt else ""
+    
     html_content = f"""
     <script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.0.4/3Dmol-min.js"></script>
-    <div id="container" style="height: 380px; width: 100%; position: relative;"></div>
+    <div id="container" style="height: 400px; width: 100%; position: relative;"></div>
     <script>
         let viewer = $3Dmol.createViewer(document.getElementById('container'), {{backgroundColor: '#f8f9fa'}});
-        viewer.addModel(`{pdb_string}`, 'pdb');
-        viewer.setStyle({{}}, {{{style_type}: {{colorscheme: '{scheme}'}}}});
+        
+        // Load target structure model (Index 0)
+        viewer.addModel(`{receptor_pdbqt}`, 'pdb');
+        viewer.setStyle({{model: 0}}, {{cartoon: {{colorscheme: 'spectrum'}}}});
+        
+        // Load target ligand model (Index 1) if available
+        {ligand_block}
+        
         viewer.zoomTo();
         viewer.render();
     </script>
     """
-    components.html(html_content, height=390)
+    components.html(html_content, height=410)
 
 
 # --- WEB RUNTIME INTERFACE ---
@@ -176,10 +241,11 @@ def render_molecule_html(pdb_string, style_type="stick", scheme="cyanCarbon"):
 st.set_page_config(page_title="In Silico Docking Hub", layout="wide")
 st.title("🔬 Automated Molecular Docking Studio")
 
-# Setup persistent background session variables to track centers across changes
+# Session state initializations to track cross-interaction values
 if "center_x" not in st.session_state: st.session_state.center_x = 0.0
 if "center_y" not in st.session_state: st.session_state.center_y = 0.0
 if "center_z" not in st.session_state: st.session_state.center_z = 0.0
+if "docking_results_raw" not in st.session_state: st.session_state.docking_results_raw = None
 
 col_params, col_visual = st.columns([1, 1])
 target_ready = False
@@ -196,7 +262,7 @@ with col_params:
             if fetch_success:
                 cx, cy, cz = calculate_protein_center(pdb_file_path)
                 st.session_state.center_x, st.session_state.center_y, st.session_state.center_z = cx, cy, cz
-                st.success(f"Protein structural center mapped automatically to coordinates: X={cx:.1f}, Y={cy:.1f}, Z={cz:.1f}")
+                st.success(f"Protein structural center mapped automatically: X={cx:.1f}, Y={cy:.1f}, Z={cz:.1f}")
                 conv_success, err_msg = convert_pdb_to_pdbqt(pdb_file_path, prepared_receptor_path, is_ligand=False)
                 target_ready = conv_success
                 
@@ -231,20 +297,48 @@ with col_params:
     run_btn = st.button("🚀 Initialize Docking Algorithm", type="primary", disabled=not target_ready)
 
 with col_visual:
-    st.header("4. Active Viewport Canvas")
-    view_mode = st.radio("Select Viewport Target Matrix:", ["View Ligand Geometry", "View Target Protein Structure"])
+    st.header("4. Active Viewport & Analytics")
     
-    if view_mode == "View Ligand Geometry" and smiles_input:
-        success, res = convert_smiles_to_pdbqt(smiles_input)
-        if success:
-            with open(res, "r") as f: ligand_data = f.read()
-            render_molecule_html(ligand_data, style_type="stick", scheme="cyanCarbon")
+    # Toggle interface layout between active setup states or evaluation results dashboards
+    if st.session_state.docking_results_raw is None:
+        view_mode = st.radio("Select Viewport Target Matrix:", ["View Input Ligand", "View Target Protein Structure"])
+        
+        if view_mode == "View Input Ligand" and smiles_input:
+            success, res = convert_smiles_to_pdbqt(smiles_input)
+            if success:
+                with open(res, "r") as f: ligand_data = f.read()
+                render_complex_html(receptor_pdbqt="", ligand_pdbqt=ligand_data)
+                
+        elif view_mode == "View Target Protein Structure" and target_ready:
+            if os.path.exists(prepared_receptor_path):
+                with open(prepared_receptor_path, "r") as f: protein_data = f.read()
+                render_complex_html(receptor_pdbqt=protein_data, ligand_pdbqt=None)
+    else:
+        st.subheader("Interactive Complex Viewport")
+        
+        # Pull separate calculated poses arrays
+        parsed_poses = split_docking_poses("docking_poses.pdbqt")
+        
+        if parsed_poses:
+            # Dropdown menu to let users cycle through modes
+            selected_pose = st.selectbox(
+                "Choose Docking Pose to Visualize:", 
+                options=list(parsed_poses.keys()),
+                format_func=lambda x: f"Mode {x} Pose Fit"
+            )
             
-    elif view_mode == "View Target Protein Structure" and target_ready:
-        if os.path.exists(prepared_receptor_path):
+            # Read both elements back to project a combined image frame
             with open(prepared_receptor_path, "r") as f: protein_data = f.read()
-            render_molecule_html(protein_data, style_type="cartoon", scheme="spectrum")
+            render_complex_html(receptor_pdbqt=protein_data, ligand_pdbqt=parsed_poses[selected_pose])
+        else:
+            st.warning("No structural model models found in output variables.")
+            
+        # Reset toggle to go back to target adjustments setup window
+        if st.button("🔄 Reset Environment Canvas"):
+            st.session_state.docking_results_raw = None
+            st.rerun()
 
+    # --- ACTION EXECUTION BOUNDARY ---
     if run_btn and target_ready:
         with st.spinner("Processing structural search calculations using flexible ligand geometries..."):
             vina_command = [
@@ -258,10 +352,45 @@ with col_visual:
             ]
             try:
                 process = subprocess.run(vina_command, capture_output=True, text=True, check=True)
-                st.success("Docking processing calculations completed successfully!")
                 if process.stdout:
-                    st.subheader("📊 Vina Scoring Report")
-                    st.text_area(label="Results Log", value=process.stdout, height=300)
+                    # Capture the data in our session state to prevent refresh losses
+                    st.session_state.docking_results_raw = process.stdout
+                    st.success("Calculations complete! Redirecting viewport to dashboard views...")
+                    st.rerun()
             except subprocess.CalledProcessError as err:
                 st.error("Calculations exited with error flags.")
                 st.code(err.stderr if err.stderr else err.stdout)
+
+# --- GLOBAL DATAFRAME ANALYTICS DISPLAY ZONE ---
+if st.session_state.docking_results_raw is not None:
+    st.write("---")
+    st.header("📊 Screening Metrics Dashboard & Data Export")
+    
+    # Run text conversion routine to generate clear tabular formats
+    df_results = parse_vina_output_text(st.session_state.docking_results_raw)
+    
+    if not df_results.empty:
+        col_table, col_export = st.columns([2, 1])
+        
+        with col_table:
+            st.subheader("Sortable Affinities Log Matrix")
+            # Render interactive data matrix component
+            st.dataframe(df_results, hide_index=True, use_container_width=True)
+            
+        with col_export:
+            st.subheader("Export Evaluation Sheet")
+            st.write("Extract calculated parameters directly for use in formal research publications, charting, or records.")
+            
+            # Convert tabular structures directly to clean csv streams
+            csv_data = df_results.to_csv(index=False).encode('utf-8')
+            
+            st.download_button(
+                label="📥 Download Data Sheet (.CSV)",
+                data=csv_data,
+                file_name="screening_affinity_report.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+    else:
+        st.warning("Data logger output was unparseable. Raw log dump matches below:")
+        st.text(st.session_state.docking_results_raw)
