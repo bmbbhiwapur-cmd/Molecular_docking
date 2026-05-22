@@ -105,6 +105,57 @@ def parse_bound_ligands(file_path):
     return processed_ligands
 
 
+# --- ADVANCED BIOPHYSICAL INTERACTION PARSER ENGINE ---
+
+def parse_pdbqt_coordinates(pdbqt_string):
+    atoms = []
+    for line in pdbqt_string.split("\n"):
+        if line.startswith(("ATOM", "HETATM")):
+            try:
+                x = float(line[30:38].strip())
+                y = float(line[38:46].strip())
+                z = float(line[46:54].strip())
+                element = line[76:78].strip().upper()
+                res_name = line[17:20].strip()
+                res_seq = line[22:26].strip()
+                atoms.append({"coord": np.array([x, y, z]), "element": element, "res": f"{res_name}{res_seq}"})
+            except ValueError: continue
+    return atoms
+
+def compute_spatial_interactions(receptor_file, ligand_pdbqt_str):
+    interactions = []
+    if not os.path.exists(receptor_file): return interactions
+    
+    with open(receptor_file, "r") as f:
+         receptor_atoms = parse_pdbqt_coordinates(f.read())
+    ligand_atoms = parse_pdbqt_coordinates(ligand_pdbqt_str)
+    
+    seen = set()
+    for l_at in ligand_atoms:
+        for r_at in receptor_atoms:
+            dist = np.linalg.norm(l_at["coord"] - r_at["coord"])
+            if dist < 3.8: 
+                res_id = r_at["res"]
+                if res_id in seen: continue
+                
+                if l_at["element"] in ["N", "O", "F", "S"] and r_at["element"] in ["N", "O", "F", "S"]:
+                    b_type = "Hydrogen Bond (H-Bond)"
+                elif "A" in r_at["element"] or (l_at["element"] == "C" and r_at["element"] == "C" and any(aro in r_at["res"] for aro in ["PHE", "TYR", "TRP"])):
+                    b_type = "pi-Stacking / Hydrophobic"
+                else:
+                    b_type = "van der Waals Contact"
+                    
+                seen.add(res_id)
+                interactions.append({
+                    "Residue Contact": res_id,
+                    "Interaction Type": b_type,
+                    "Distance (Å)": round(dist, 2),
+                    "r_coord": r_at["coord"].tolist(),
+                    "l_coord": l_at["coord"].tolist()
+                })
+    return interactions
+
+
 # --- CHEMINFORMATICS FRAMEWORKS ---
 
 def fetch_pdb_from_rcsb(pdb_id):
@@ -187,7 +238,7 @@ def convert_smiles_to_pdbqt(smiles_string, output_filename="ligand.pdbqt"):
     except Exception as e: return False, str(e)
 
 
-# --- VISUALIZATION CONSTRUCTS ---
+# --- VISUALIZATION CONSTRUCTS & ADVANCED BLUEPRINT LAYER ---
 
 def generate_2d_ligand_img(mol):
     if mol is None: return None
@@ -218,6 +269,46 @@ def render_complex_html(receptor_pdbqt, ligand_pdbqt=None):
     </script>
     """
     components.html(html_content, height=390)
+
+def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon", show_surface=False, interactions_list=[]):
+    """Generates an advanced multi-model workspace tracking spatial atomic binding constraints."""
+    surface_js = "viewer.addSurface($3Dmol.SurfaceType.VDW, {opacity:0.45, colorscheme:{prop:'b',gradient:'rwb'}}, {model:0});" if show_surface else ""
+    
+    int_lines_js = ""
+    for interact in interactions_list:
+        rc = interact["r_coord"]
+        lc = interact["l_coord"]
+        color = "yellow" if "Hydrogen" in interact["Interaction Type"] else "cyan"
+        int_lines_js += f"""
+        viewer.addCylinder({{start:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, end:{{x:{lc[0]}, y:{lc[1]}, z:{lc[2]}}}, radius:0.07, color:'{color}', dashed:true}});
+        viewer.addLabel("{interact['Residue Contact']} ({interact['Distance (Å)']}A)", {{position:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, backgroundColor:'white', fontColor:'black', backgroundOpacity:0.8, fontSize:11}});
+        """
+
+    html_content = f"""
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.0.4/3Dmol-min.js"></script>
+    <div id="container" style="height: 480px; width: 100%; position: relative; border-radius:10px; border:1px solid #eaeaea; box-shadow: 0 4px 6px rgba(0,0,0,0.05);"></div>
+    <script>
+        let viewer = $3Dmol.createViewer(document.getElementById('container'), {{backgroundColor: '#ffffff'}});
+        if (`{receptor_data}`.trim().length > 0) {{
+            viewer.addModel(`{receptor_data}`, 'pdb');
+            if ('{mode}' === 'cartoon') {{
+                viewer.setStyle({{model: 0}}, {{cartoon: {{colorscheme: 'spectrum'}}}});
+            }} else if ('{mode}' === 'spacefill') {{
+                viewer.setStyle({{model: 0}}, {{sphere: {{colorscheme: 'spectrum', radius:1.1}}}});
+            }} else {{
+                viewer.setStyle({{model: 0}}, {{stick: {{colorscheme: 'spectrum', radius:0.25}}}});
+            }}
+        }}
+        {surface_js}
+        if (`{ligand_data}`.trim().length > 0) {{
+            viewer.addModel(`{ligand_data}`, 'pdb');
+            viewer.setStyle({{model: 1}}, {{stick: {{colorscheme: 'greenCarbon', radius: 0.28}}}});
+        }}
+        {int_lines_js}
+        viewer.zoomTo(); viewer.render();
+    </script>
+    """
+    components.html(html_content, height=490)
 
 
 # --- LOG FILE PARSERS ---
@@ -308,17 +399,15 @@ with col_params:
     if st.session_state.target_ready and st.session_state.local_target_path:
         meta = extract_pdb_metadata(st.session_state.local_target_path, st.session_state.pdb_id_display)
         st.markdown(f"""
-        > **Protein Summary Profile:**  
-        > *   **Title:** {meta['title']}  
-        > *   **PDB ID:** `{meta['id']}` | **Classification:** {meta['class']}  
-        > *   **Organism(s):** *{meta['organism']}* | **Expression System:** {meta['system']}  
-        > *   **Experimental Method:** {meta['method']} | **Resolution:** **{meta['res']}**
+        > **Protein Summary Profile:** > * **Title:** {meta['title']}  
+        > * **PDB ID:** `{meta['id']}` | **Classification:** {meta['class']}  
+        > * **Organism(s):** *{meta['organism']}* | **Expression System:** {meta['system']}  
+        > * **Experimental Method:** {meta['method']} | **Resolution:** **{meta['res']}**
         """)
 
     st.header("2. Small Molecule Ligand Setup")
     ligand_source = st.radio("Choose Ligand Input Method:", ["SMILES String Input", "Upload Structural File (.pdb, .sdf)"])
     
-    # Process options into local background variables before button click triggers compilation
     smiles_input_val = ""
     uploaded_lig_buffer = None
     uploaded_lig_name = ""
@@ -342,7 +431,8 @@ with col_params:
                         st.session_state.ligand_ready = True
                         st.session_state.smiles_cache = smiles_input_val
                         with open("ligand.pdbqt", "r") as f: st.session_state.serialized_ligand_block = f.read()
-                        st.session_state.ligand_summary_text = f"Formula: {Chem.rdmolops.CalcMolFormula(mol)} | MW: {round(Chem.Descriptors.MolWt(mol), 2)} g/mol"
+                        # STABLE RDKit API ROOT EXPOSURE CONVERSION UPGRADE
+                        st.session_state.ligand_summary_text = f"Formula: {Chem.CalcMolFormula(mol)} | MW: {round(Chem.Descriptors.MolWt(mol), 2)} g/mol"
                         st.success("SMILES ligand structure computed and loaded successfully!")
                         st.rerun()
             except Exception as e: st.error(f"SMILES Parsing Failure: {e}")
@@ -372,7 +462,7 @@ with col_params:
                 with open("ligand.pdbqt", "r") as f: st.session_state.serialized_ligand_block = f.read()
                 
                 try:
-                    chem_formula = Chem.rdmolops.CalcMolFormula(mol)
+                    chem_formula = Chem.CalcMolFormula(mol)
                     mw = round(Chem.Descriptors.MolWt(mol), 2)
                     rot_bonds = AllChem.CalcNumRotatableBonds(mol)
                     st.session_state.ligand_summary_text = f"Formula: {chem_formula} | MW: {mw} g/mol | Rotatable Bonds: {rot_bonds}"
@@ -386,12 +476,11 @@ with col_params:
         else:
             st.warning("Please provide a valid SMILES input or structural file target before initializing configuration loops.")
 
-    # SYSTEM RE-VERIFICATION LAYER: Lock verification based on active filesystem contents
     if st.session_state.target_ready and os.path.exists("ligand.pdbqt"):
         st.session_state.ligand_ready = True
 
     if st.session_state.ligand_ready:
-        st.markdown(f"> **Ligand Metric Summary:**  \n> {st.session_state.ligand_summary_text}")
+        st.markdown(f"> **Ligand Metric Summary:** \n> {st.session_state.ligand_summary_text}")
 
     # --- BOUND CO-CRYSTAL SEARCH SITE PANEL ---
     if st.session_state.target_ready and st.session_state.local_target_path:
@@ -474,7 +563,35 @@ with col_visual:
         if parsed_poses:
             selected_pose = st.selectbox("Choose Docking Pose to Visualize:", options=list(parsed_poses.keys()), format_func=lambda x: f"Mode {x} Pose Fit")
             with open("protein.pdbqt", "r") as f: protein_data = f.read()
-            render_complex_html(receptor_pdbqt=protein_data, ligand_pdbqt=parsed_poses[selected_pose])
+            
+            # --- COMPREHENSIVE BLUEPRINT VIEWPORT CONTAINER (SD-02 ARCHITECTURE) ---
+            st.write("#### Advanced Complex Visual Modeling Blueprint")
+            
+            # Style & display modifiers split block controls
+            col_render, col_mesh = st.columns([1, 1])
+            with col_render:
+                style_mode = re.sub(r'\W+', '', st.radio("Macromolecule Style Mode:", ["Cartoon Ribbon Mesh", "Spacefill (VDW Configuration)", "Sticks Profile"]).split()[0].lower())
+            with col_mesh:
+                surf_toggle = st.checkbox("Overlay Translucent Pocket Cavity Mesh", value=False)
+                
+            active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
+            
+            # Mount advanced interaction visual modeling viewport component
+            render_advanced_modeling_blueprint(
+                receptor_data=protein_data,
+                ligand_data=parsed_poses[selected_pose],
+                mode=style_mode,
+                show_surface=surf_toggle,
+                interactions_list=active_interactions
+            )
+            
+            # Render Contact Residues Analysis Subtable Frame
+            st.subheader("🧬 Local Contact Residues Matrix")
+            if active_interactions:
+                df_int = pd.DataFrame(active_interactions)
+                st.dataframe(df_int[["Residue Contact", "Interaction Type", "Distance (Å)"]], hide_index=True, use_container_width=True)
+            else:
+                st.info("No close contacts detected within a 3.8 Å threshold radius.")
             
         if st.button("🔄 Reset Environment Canvas"):
             st.session_state.docking_results_raw = None
