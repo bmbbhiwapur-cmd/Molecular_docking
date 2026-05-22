@@ -89,7 +89,6 @@ def fetch_single_run_details(run_id):
     row = cursor.fetchone()
     conn.close()
     if row:
-        # Map table fields structural keys directly
         return {
             "timestamp": row[1], "protein_id": row[2], "ligand_name": row[3],
             "cx": row[4], "cy": row[5], "cz": row[6], "sx": row[7], "sy": row[8], "sz": row[9],
@@ -163,6 +162,7 @@ def extract_pdb_metadata(file_path, pdb_id="Custom"):
 def parse_bound_ligands(file_path):
     ligands = {}
     if not os.path.exists(file_path): return ligands
+    
     with open(file_path, "r") as f:
         for line in f:
             if line.startswith("HETATM"):
@@ -171,21 +171,34 @@ def parse_bound_ligands(file_path):
                 try: res_seq = int(line[22:26].strip())
                 except ValueError: continue
                 if res_name in ["HOH", "WAT", "DOD"]: continue
+                
                 key = f"{res_name}-{chain_id}-{res_seq}"
-                try: x, y, z = float(line[30:38].strip()), float(line[38:46].strip()), float(line[46:54].strip())
+                try:
+                    x = float(line[30:38].strip())
+                    y = float(line[38:46].strip())
+                    z = float(line[46:54].strip())
                 except ValueError: continue
-                if key not in ligands: ligands[key] = {"res": res_name, "chain": chain_id, "seq": res_seq, "coords": []}
+                
+                if key not in ligands:
+                    ligands[key] = {"res": res_name, "chain": chain_id, "seq": res_seq, "coords": []}
                 ligands[key]["coords"].append((x, y, z))
+                
     processed_ligands = []
     for key, info in ligands.items():
         pts = info["coords"]
         n_atoms = len(pts)
         if n_atoms < 4: continue
+        
         cx, cy, cz = sum([p[0] for p in pts])/n_atoms, sum([p[1] for p in pts])/n_atoms, sum([p[2] for p in pts])/n_atoms
         bx = max([p[0] for p in pts]) - min([p[0] for p in pts]) + 10.0
         by = max([p[1] for p in pts]) - min([p[1] for p in pts]) + 10.0
         bz = max([p[2] for p in pts]) - min([p[2] for p in pts]) + 10.0
-        processed_ligands.append({"ID": info["res"], "Chain": info["chain"], "ResSeq": info["seq"], "Atoms": n_atoms, "cx": round(cx, 2), "cy": round(cy, 2), "cz": round(cz, 2), "bx": round(bx, 1), "by": round(by, 1), "bz": round(bz, 1)})
+        
+        processed_ligands.append({
+            "ID": info["res"], "Chain": info["chain"], "ResSeq": info["seq"], "Atoms": n_atoms,
+            "cx": round(cx, 2), "cy": round(cy, 2), "cz": round(cz, 2),
+            "bx": round(bx, 1), "by": round(by, 1), "bz": round(bz, 1)
+        })
     return processed_ligands
 
 
@@ -209,8 +222,11 @@ def parse_pdbqt_coordinates(pdbqt_string):
 def compute_spatial_interactions(receptor_file, ligand_pdbqt_str):
     interactions = []
     if not os.path.exists(receptor_file): return interactions
-    with open(receptor_file, "r") as f: receptor_atoms = parse_pdbqt_coordinates(f.read())
+    
+    with open(receptor_file, "r") as f:
+         receptor_atoms = parse_pdbqt_coordinates(f.read())
     ligand_atoms = parse_pdbqt_coordinates(ligand_pdbqt_str)
+    
     seen = set()
     for l_at in ligand_atoms:
         for r_at in receptor_atoms:
@@ -218,14 +234,22 @@ def compute_spatial_interactions(receptor_file, ligand_pdbqt_str):
             if dist < 3.8: 
                 res_id = r_at["res"]
                 if res_id in seen: continue
+                
                 if l_at["element"] in ["N", "O", "F", "S"] and r_at["element"] in ["N", "O", "F", "S"]:
                     b_type = "Hydrogen Bond"
                 elif "A" in r_at["element"] or (l_at["element"] == "C" and r_at["element"] == "C" and any(aro in r_at["res"] for aro in ["PHE", "TYR", "TRP"])):
                     b_type = "pi-Stacking / Hydrophobic"
                 else:
                     b_type = "van der Waals Contact"
+                    
                 seen.add(res_id)
-                interactions.append({"Residue Contact": res_id, "Interaction Type": b_type, "Distance (Å)": round(dist, 2), "r_coord": r_at["coord"].tolist(), "l_coord": l_at["coord"].tolist()})
+                interactions.append({
+                    "Residue Contact": res_id,
+                    "Interaction Type": b_type,
+                    "Distance (Å)": round(dist, 2),
+                    "r_coord": r_at["coord"].tolist(),
+                    "l_coord": l_at["coord"].tolist()
+                })
     return interactions
 
 
@@ -242,7 +266,11 @@ def fetch_pdb_from_rcsb(pdb_id):
         return False, f"Could not find or download PDB ID '{pdb_id.upper()}'."
 
 def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=False):
-    autodock_type_map = {"H": "H", "HD": "HD", "HS": "HS", "C": "C", "A": "A", "N": "N", "NA": "NA", "NS": "NS", "O": "O", "OA": "OA", "S": "S", "SA": "SA", "P": "P", "F": "F", "CL": "Cl", "BR": "Br", "I": "I", "ZN": "Zn", "MG": "Mg"}
+    autodock_type_map = {
+        "H": "H", "HD": "HD", "HS": "HS", "C": "C", "A": "A", "N": "N", "NA": "NA", 
+        "NS": "NS", "O": "O", "OA": "OA", "S": "S", "SA": "SA", "P": "P", "F": "F", 
+        "CL": "Cl", "BR": "Br", "I": "I", "ZN": "Zn", "MG": "Mg"
+    }
     torsions = 0
     if is_ligand:
         try:
@@ -290,6 +318,25 @@ def convert_smiles_to_pdbqt(smiles_string, output_filename="ligand.pdbqt"):
         if os.path.exists(temp_pdb): os.remove(temp_pdb)
         return True, output_filename
     except Exception as e: return False, str(e)
+
+
+# --- LOG FILE PARSERS (POSITIONED HIGH UP AT GBL CAPABLE WORKSPACES) ---
+
+def split_docking_poses(poses_file_path):
+    poses = {}
+    if not os.path.exists(poses_file_path): return poses
+    current_mode, current_lines = None, []
+    with open(poses_file_path, "r") as f:
+        for line in f:
+            if line.startswith("MODEL"):
+                try: current_mode = int(line.split()[1])
+                except Exception: current_mode = len(poses) + 1
+                current_lines = []
+            elif line.startswith("ENDMDL"):
+                if current_mode is not None: poses[current_mode] = "".join(current_lines)
+                current_mode = None
+            else: current_lines.append(line)
+    return poses
 
 
 # --- HIGH PERFORMANCE VISUALIZATION CONSTRUCTS ---
@@ -355,12 +402,11 @@ def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon
     components.html(html_content, height=510)
 
 
-# --- APPLICATION DASHBOARD INTERFACE WORKSPACE ---
+# --- APPLICATION DASHBOARD WORKSPACE ---
 
 st.set_page_config(page_title="In Silico Docking Hub", layout="wide")
 st.title("🔬 Automated Molecular Docking Studio")
 
-# Initialize persistent memory parameters safely
 if "cx" not in st.session_state: st.session_state.cx = 0.0
 if "cy" not in st.session_state: st.session_state.cy = 0.0
 if "cz" not in st.session_state: st.session_state.cz = 0.0
@@ -376,7 +422,7 @@ if "serialized_ligand_block" not in st.session_state: st.session_state.serialize
 if "ligand_summary_text" not in st.session_state: st.session_state.ligand_summary_text = ""
 if "smiles_cache" not in st.session_state: st.session_state.smiles_cache = ""
 
-# --- SIDEBAR DATABASE LIGAND DOCKING HISTORY MATRIX ---
+# --- SIDEBAR DATABASE RUN HISTORY MATRIX PANEL ---
 st.sidebar.header("📁 Docking Run History Matrix")
 history_records = fetch_all_history_records()
 
@@ -389,7 +435,6 @@ if history_records:
         run_data = fetch_single_run_details(selected_run_id)
         
         if run_data:
-            # Rehydrate the exact parameters from SQLite storage directly
             st.session_state.cx = run_data["cx"]
             st.session_state.cy = run_data["cy"]
             st.session_state.cz = run_data["cz"]
@@ -401,14 +446,14 @@ if history_records:
             st.session_state.ligand_summary_text = run_data["ligand_summary"]
             st.session_state.smiles_cache = run_data["smiles_cache"]
             st.session_state.docking_results_raw = run_data["results_raw"]
-            
-            # Reconstruct background system files to prevent loading loop errors
             st.session_state.target_ready = True
             st.session_state.ligand_ready = True
             st.session_state.pdb_id_display = run_data["protein_id"]
             
             with open("ligand.pdbqt", "w") as f: f.write(run_data["serialized_ligand"])
-            st.sidebar.success(f"Loaded Run #{selected_run_id} completely!")
+            # Reconstruct dummy coordinate trace file if rehydrating historical data matrices
+            with open("docking_poses.pdbqt", "w") as f: f.write("")
+            st.sidebar.success(f"Loaded Run #{selected_run_id}!")
 else:
     st.sidebar.info("No saved computational runs discovered inside the database matrix yet.")
 
@@ -574,70 +619,74 @@ with col_visual:
                 except Exception: pass
     else:
         st.subheader("Interactive Complex Viewport")
-        parsed_poses = split_docking_poses("docking_poses.pdbqt")
-        if parsed_poses:
-            selected_pose = st.selectbox("Choose Docking Pose to Visualize:", options=list(parsed_poses.keys()), format_func=lambda x: f"Mode {x} Pose Fit")
-            with open("protein.pdbqt", "r") as f: protein_data = f.read()
-            
-            def get_pose_affinity(stdout_text, idx):
-                for line in stdout_text.split("\n"):
-                    m = re.match(r"^\s*(\d+)\s+([-+]?\d+\.\d+)", line)
-                    if m and int(m.group(1)) == idx: return m.group(2)
-                return "N/A"
-            
-            pose_affinity_score = get_pose_affinity(st.session_state.docking_results_raw, selected_pose)
-            active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
-            
-            amino_acid_categories = {"Acidic (-ve)": [], "Basic (+ve)": [], "Polar (Neutral)": [], "Hydrophobic": []}
-            for item in active_interactions:
-                res_full = item["Residue Contact"]
-                res_name = "".join([c for c in res_full if c.isalpha()]).upper()
-                if res_name in ["ASP", "GLU"]: amino_acid_categories["Acidic (-ve)"].append(res_full)
-                elif res_name in ["LYS", "ARG", "HIS"]: amino_acid_categories["Basic (+ve)"].append(res_full)
-                elif res_name in ["SER", "THR", "ASN", "GLN", "CYS", "TYR"]: amino_acid_categories["Polar (Neutral)"].append(res_full)
-                else: amino_acid_categories["Hydrophobic"].append(res_full)
-            
-            breakdown_html = ""
-            for cat_name, res_list in amino_acid_categories.items():
-                if res_list:
-                    labels_joined = ", ".join(list(set(res_list)))
-                    breakdown_html += f"<p style='margin:4px 0; font-size:13px;'><b>{cat_name}:</b> <span style='color:#333;'>{labels_joined}</span></p>"
-            if not breakdown_html: breakdown_html = "<p style='margin:4px 0; color:#777; font-size:13px;'>No pocket interactions detected.</p>"
-
-            html_metric_card = """
-            <div style="background-color:#f0f7f4; border-left:6px solid #2e7d32; padding:16px; border-radius:8px; margin-bottom:15px; font-family:sans-serif;">
-                <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #e0e8e4; padding-bottom:8px; margin-bottom:10px;">
-                    <div>
-                        <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Active Pose Affinity</span><br>
-                        <span style="font-size:36px; font-weight:900; color:#1b5e20;">{} <span style="font-size:18px; font-weight:normal;">kcal/mol</span></span>
-                    </div>
-                    <div style="text-align:right; border-left:1px solid #e0e8e4; padding-left:15px;">
-                        <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Total Contacts</span><br>
-                        <span style="font-size:32px; font-weight:800; color:#2e7d32;">{}</span>
-                    </div>
-                </div>
-                <div>
-                    <span style="font-size:11px; color:#666; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px; display:block; margin-bottom:4px;">Binding Site Amino Acid Properties Breakdown:</span>
-                    {}
-                </div>
-            </div>
-            """.format(pose_affinity_score, len(active_interactions), breakdown_html)
-            st.html(html_metric_card)
-            
-            col_render, col_mesh = st.columns([1, 1])
-            with col_render:
-                style_mode = re.sub(r'\W+', '', st.radio("Macromolecule Style Mode:", ["Cartoon Ribbon Mesh", "Spacefill (VDW Configuration)", "Sticks Profile"]).split()[0].lower())
-            with col_mesh:
-                surf_toggle = st.checkbox("Overlay Translucent Pocket Cavity Mesh", value=False)
+        # HARD GUARD CONTEXT: Halts rendering if poses map template doesn't yet exist on server disk memory space
+        if os.path.exists("docking_poses.pdbqt"):
+            parsed_poses = split_docking_poses("docking_poses.pdbqt")
+            if parsed_poses:
+                selected_pose = st.selectbox("Choose Docking Pose to Visualize:", options=list(parsed_poses.keys()), format_func=lambda x: f"Mode {x} Pose Fit")
+                with open("protein.pdbqt", "r") as f: protein_data = f.read()
                 
-            render_advanced_modeling_blueprint(receptor_data=protein_data, ligand_data=parsed_poses[selected_pose], mode=style_mode, show_surface=surf_toggle, interactions_list=active_interactions)
-            
-            st.subheader("🧬 Local Contact Residues & Bond Assignments Matrix")
-            if active_interactions:
-                df_int = pd.DataFrame(active_interactions)
-                st.dataframe(df_int[["Residue Contact", "Interaction Type", "Distance (Å)"]], hide_index=True, use_container_width=True)
-            else:
-                st.info("No close contacts detected within a 3.8 Å threshold radius.")
+                def get_pose_affinity(stdout_text, idx):
+                    for line in stdout_text.split("\n"):
+                        m = re.match(r"^\s*(\d+)\s+([-+]?\d+\.\d+)", line)
+                        if m and int(m.group(1)) == idx: return m.group(2)
+                    return "N/A"
+                
+                pose_affinity_score = get_pose_affinity(st.session_state.docking_results_raw, selected_pose)
+                active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
+                
+                amino_acid_categories = {"Acidic (-ve)": [], "Basic (+ve)": [], "Polar (Neutral)": [], "Hydrophobic": []}
+                for item in active_interactions:
+                    res_full = item["Residue Contact"]
+                    res_name = "".join([c for c in res_full if c.isalpha()]).upper()
+                    if res_name in ["ASP", "GLU"]: amino_acid_categories["Acidic (-ve)"].append(res_full)
+                    elif res_name in ["LYS", "ARG", "HIS"]: amino_acid_categories["Basic (+ve)"].append(res_full)
+                    elif res_name in ["SER", "THR", "ASN", "GLN", "CYS", "TYR"]: amino_acid_categories["Polar (Neutral)"].append(res_full)
+                    else: amino_acid_categories["Hydrophobic"].append(res_full)
+                
+                breakdown_html = ""
+                for cat_name, res_list in amino_acid_categories.items():
+                    if res_list:
+                        labels_joined = ", ".join(list(set(res_list)))
+                        breakdown_html += f"<p style='margin:4px 0; font-size:13px;'><b>{cat_name}:</b> <span style='color:#333;'>{labels_joined}</span></p>"
+                if not breakdown_html: breakdown_html = "<p style='margin:4px 0; color:#777; font-size:13px;'>No pocket interactions detected.</p>"
+
+                html_metric_card = """
+                <div style="background-color:#f0f7f4; border-left:6px solid #2e7d32; padding:16px; border-radius:8px; margin-bottom:15px; font-family:sans-serif;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #e0e8e4; padding-bottom:8px; margin-bottom:10px;">
+                        <div>
+                            <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Active Pose Affinity</span><br>
+                            <span style="font-size:36px; font-weight:900; color:#1b5e20;">{} <span style="font-size:18px; font-weight:normal;">kcal/mol</span></span>
+                        </div>
+                        <div style="text-align:right; border-left:1px solid #e0e8e4; padding-left:15px;">
+                            <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Total Contacts</span><br>
+                            <span style="font-size:32px; font-weight:800; color:#2e7d32;">{}</span>
+                        </div>
+                    </div>
+                    <div>
+                        <span style="font-size:11px; color:#666; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px; display:block; margin-bottom:4px;">Binding Site Amino Acid Properties Breakdown:</span>
+                        {}
+                </div>
+                </div>
+                """.format(pose_affinity_score, len(active_interactions), breakdown_html)
+                st.html(html_metric_card)
+                
+                col_render, col_mesh = st.columns([1, 1])
+                with col_render:
+                    style_mode = re.sub(r'\W+', '', st.radio("Macromolecule Style Mode:", ["Cartoon Ribbon Mesh", "Spacefill (VDW Configuration)", "Sticks Profile"]).split()[0].lower())
+                with col_mesh:
+                    surf_toggle = st.checkbox("Overlay Translucent Pocket Cavity Mesh", value=False)
+                    
+                render_advanced_modeling_blueprint(receptor_data=protein_data, ligand_data=parsed_poses[selected_pose], mode=style_mode, show_surface=surf_toggle, interactions_list=active_interactions)
+                
+                st.subheader("🧬 Local Contact Residues & Bond Assignments Matrix")
+                if active_interactions:
+                    df_int = pd.DataFrame(active_interactions)
+                    st.dataframe(df_int[["Residue Contact", "Interaction Type", "Distance (Å)"]], hide_index=True, use_container_width=True)
+                else:
+                    st.info("No close contacts detected within a 3.8 Å threshold radius.")
+        else:
+            st.info("Initializing active layout matrices workspace pipelines...")
             
         if st.button("🔄 Reset Environment Canvas"):
             st.session_state.docking_results_raw = None
@@ -652,12 +701,12 @@ with col_visual:
                 if process.stdout:
                     st.session_state.docking_results_raw = process.stdout
                     
-                    # EXTRACT LIGAND UNIQUE IDENTIFIER FROM CACHED FIELDS FOR INDEX ARCHIVING
                     lig_id_text = "Compound"
-                    if "SMILES" in ligand_source: lig_id_text = smiles_input_val[:12]
-                    elif uploaded_lig_name: lig_id_text = uploaded_lig_name
+                    if ligand_source == "SMILES String Input" and smiles_input_val:
+                        lig_id_text = smiles_input_val[:12]
+                    elif uploaded_lig_name:
+                        lig_id_text = uploaded_lig_name
                     
-                    # COMMIT FULL SESSION ARCHIVE DIRECTLY TO DATABASE MATRIX
                     save_run_to_history(
                         protein_id=st.session_state.pdb_id_display,
                         ligand_name=lig_id_text,
