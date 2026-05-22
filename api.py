@@ -427,7 +427,7 @@ with col_params:
                             st.rerun()
                 except Exception as e: st.error(f"SMILES Parsing Failure: {e}")
             
-       elif ligand_source == "Upload Structural File (.pdb, .sdf)" and uploaded_lig_buffer is not None:
+    elif ligand_source == "Upload Structural File (.pdb, .sdf)" and uploaded_lig_buffer is not None:
             temp_in = f"raw_ligand_{uploaded_lig_name}"
             with open(temp_in, "wb") as f: f.write(uploaded_lig_buffer.getbuffer())
             
