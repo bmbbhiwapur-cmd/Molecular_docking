@@ -84,7 +84,6 @@ def parse_bound_ligands(file_path):
 # --- ADVANCED CHEMICAL INTERACTION PARSER ENGINE ---
 
 def parse_pdbqt_coordinates(pdbqt_string):
-    """Extracts atom entries and 3D coordinates from a PDBQT string data block."""
     atoms = []
     for line in pdbqt_string.split("\n"):
         if line.startswith(("ATOM", "HETATM")):
@@ -100,7 +99,6 @@ def parse_pdbqt_coordinates(pdbqt_string):
     return atoms
 
 def compute_spatial_interactions(receptor_file, ligand_pdbqt_str):
-    """Calculates distances between ligand and protein atoms to determine binding types."""
     interactions = []
     if not os.path.exists(receptor_file): return interactions
     
@@ -112,11 +110,10 @@ def compute_spatial_interactions(receptor_file, ligand_pdbqt_str):
     for l_at in ligand_atoms:
         for r_at in receptor_atoms:
             dist = np.linalg.norm(l_at["coord"] - r_at["coord"])
-            if dist < 3.8: # Threshold under 3.8 Å indicates an active non-covalent bond
+            if dist < 3.8: 
                 res_id = r_at["res"]
                 if res_id in seen: continue
                 
-                # Determine interaction type based on elemental properties
                 if l_at["element"] in ["N", "O", "F"] and r_at["element"] in ["N", "O", "F"]:
                     b_type = "Hydrogen Bond (H-Bond)"
                 elif "C" in l_at["element"] and ("C" in r_at["element"] or "A" in r_at["element"]):
@@ -204,10 +201,8 @@ def generate_2d_ligand_img(mol):
     except Exception: return None
 
 def render_dynamic_docking_html(receptor_data, ligand_data, mode="stick", show_surface=False, interactions_list=[]):
-    """Generates an online interactive 3D viewport canvas supporting advanced style toggles."""
     surface_js = "viewer.addSurface($3Dmol.SurfaceType.VDW, {opacity:0.65, colorscheme:{prop:'b',gradient:'rwb'}}, {model:0});" if show_surface else ""
     
-    # Generate JavaScript vectors to draw non-covalent interactions as dashed lines
     int_lines_js = ""
     for idx, interact in enumerate(interactions_list):
         rc = interact["r_coord"]
@@ -224,7 +219,6 @@ def render_dynamic_docking_html(receptor_data, ligand_data, mode="stick", show_s
     <script>
         let viewer = $3Dmol.createViewer(document.getElementById('container'), {{backgroundColor: '#ffffff'}});
         
-        // Model 0: Receptor Protein
         viewer.addModel(`{receptor_data}`, 'pdb');
         if ('{mode}' === 'cartoon') {{
             viewer.setStyle({{model: 0}}, {{cartoon: {{colorscheme: 'spectrum'}}}});
@@ -236,7 +230,6 @@ def render_dynamic_docking_html(receptor_data, ligand_data, mode="stick", show_s
         
         {surface_js}
         
-        // Model 1: Dynamic Bound Ligand
         if (`{ligand_data}`.trim().length > 0) {{
             viewer.addModel(`{ligand_data}`, 'pdb');
             viewer.setStyle({{model: 1}}, {{stick: {{colorscheme: 'cyanCarbon', radius: 0.25}}}});
@@ -271,10 +264,10 @@ if "serialized_ligand_block" not in st.session_state: st.session_state.serialize
 if "ligand_summary_text" not in st.session_state: st.session_state.ligand_summary_text = ""
 if "smiles_cache" not in st.session_state: st.session_state.smiles_cache = ""
 
-# --- EXPERIMENTAL TAB WINDOW ARRAYS ---
+# --- TAB WINDOW ARRAYS ---
 window_tabs = st.tabs(["🏛 Target Protein Profile", "💊 Small Molecule Ligand Profiler", "⚙ Computational Grid Box Settings"])
 
-# --- WINDOW 1: PROTEIN CONTROL FRAMEWORK ---
+# --- WINDOW 1: PROTEIN FRAMEWORK ---
 with window_tabs[0]:
     st.subheader("Target Macromolecule Workspace Configuration")
     protein_source = st.radio("Choose Protein Input Method:", ["Type 4-Letter PDB ID", "Upload File (.pdb or .pdbqt)"], key="prot_src_radio")
@@ -383,12 +376,15 @@ with window_tabs[1]:
             st.write("#### 2D Chemical Blueprint Structure")
             m_img = Chem.MolFromPDBFile("ligand.pdbqt", removeHs=True) if "raw_ligand" in st.session_state.smiles_cache else Chem.MolFromSmiles(st.session_state.smiles_cache)
             img_b64 = generate_2d_ligand_img(m_img)
-            if img_b64: st.markdown(f'<div style="text-align:center; background: white; padding:10px; border-radius:8px;"><img src="data:image/png;base64,{img_b64}"/></div>', unsafe_html=True)
+            if img_b64:
+                # FIXED: Separated HTML string execution container to bypass raw f-string brace formatting flags
+                html_raw_div = '<div style="text-align:center; background: white; padding:10px; border-radius:8px;"><img src="data:image/png;base64,{}"/></div>'.format(img_b64)
+                st.markdown(html_raw_div, unsafe_html=True)
         with col_l3d:
             st.write("#### Isolated 3D Chemical Sticks")
             render_dynamic_docking_html(receptor_data="", ligand_data=st.session_state.serialized_ligand_block, mode="stick")
 
-# --- WINDOW 3: AUTOMATED BOUND POCKET GRID AUTO-LOCK SYSTEM ---
+# --- WINDOW 3: AUTOMATED CO-CRYSTAL SEARCH SITE AUTO-LOCK ---
 with window_tabs[2]:
     st.subheader("Grid Parameter Search Workspace Settings")
     if st.session_state.target_ready and st.session_state.local_target_path:
@@ -431,6 +427,17 @@ if st.session_state.docking_results_raw is not None:
     st.header("🏁 Screening Metrics Workspace Dashboard & 3D Interactive Viewer")
     
     col_view3d, col_table_metrics = st.columns([1, 1])
+    
+    # Simple direct log row parsing method
+    def parse_vina_output_text(stdout_text):
+        data = []
+        pattern = re.compile(r"^\s*(\d+)\s+([-+]?\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)")
+        for line in stdout_text.split("\n"):
+            match = pattern.match(line)
+            if match:
+                data.append({"Binding Mode": int(match.group(1)), "Affinity (kcal/mol)": float(match.group(2)), "RMSD l.b.": float(match.group(3)), "RMSD u.b.": float(match.group(4))})
+        return pd.DataFrame(data)
+        
     parsed_poses = split_docking_poses("docking_poses.pdbqt")
     
     with col_table_metrics:
@@ -438,19 +445,15 @@ if st.session_state.docking_results_raw is not None:
         df_results = parse_vina_output_text(st.session_state.docking_results_raw)
         st.dataframe(df_results, hide_index=True, use_container_width=True)
         
-        # Free Download Data actions
         csv_data = df_results.to_csv(index=False).encode('utf-8')
         st.download_button(label="📥 Download Affinity Excel Report Sheet (.CSV)", data=csv_data, file_name="screening_affinity_report.csv", mime="text/csv", use_container_width=True)
         
-        # Setup active toggle switch parameters for the 3D visual engine controls
         selected_pose = st.selectbox("Select Target Mode Pose to Profile:", options=list(parsed_poses.keys()), format_func=lambda x: f"Mode {x} Pose Binding Affinity Alignment")
         
-        # Real-time Display Modifiers
         st.subheader("🎨 Viewport Rendering Controls")
         style_mode = re.sub(r'\W+', '', st.radio("Macromolecule Display Representation Mode:", ["Cartoon Backbone Mesh", "Spacefill (VDW Surface Profile)"]).split()[0].lower())
         surf_toggle = st.checkbox("Superimpose Translucent Binding Pocket Cavity Surface Mesh", value=False)
         
-        # --- DYNAMIC INTERACTION TABLE PARSER ---
         if selected_pose in parsed_poses:
             st.subheader("🧬 Local Pocket Contact Residues Matrix")
             interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
@@ -470,7 +473,6 @@ if st.session_state.docking_results_raw is not None:
             with open("protein.pdbqt", "r") as f: receptor_data_string = f.read()
             active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
             
-            # Send values over to the javascript script execution layer
             render_dynamic_docking_html(
                 receptor_data=receptor_data_string, 
                 ligand_data=parsed_poses[selected_pose], 
