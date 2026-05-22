@@ -472,7 +472,7 @@ with col_params:
                 # 3. Update summary with PubChem data + RDKit calculations
                 st.session_state.ligand_summary_text = (
                     f"**Name:** {pub_data.get('name', 'N/A')} | "
-                    f"**Formula:** {Chem.CalcMolFormula(mol)} | "
+                    f"**Formula:** {Chem.rdMolDescriptors.CalcMolFormula(mol)} | "
                     f"**MW:** {round(Descriptors.MolWt(mol), 2)} g/mol | "
                     f"**Rotatable Bonds:** {AllChem.CalcNumRotatableBonds(mol)}"
                 )
