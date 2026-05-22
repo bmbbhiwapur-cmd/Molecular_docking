@@ -39,24 +39,36 @@ def fetch_pdb_from_rcsb(pdb_id):
 def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt"):
     """
     Parses a standard PDB structural file and builds a compliant PDBQT format
-    by assigning default partial gas-charges and Gasteiger-type atom descriptors.
+    by strictly mapping atomic coordinates to exact character columns.
     """
     try:
         with open(input_pdb, "r") as pdb, open(output_pdbqt, "w") as pdbqt:
             for line in pdb:
                 if line.startswith(("ATOM", "HETATM")):
-                    # Extract standard PDB coordinates element tag
+                    # Extract the elemental symbol from columns 76-78
                     element = line[76:78].strip()
                     if not element:
-                        element = line[12:14].strip() # Fallback mapping element from atom name string
+                        element = line[12:14].strip() # Fallback to atom name column
                     
-                    # Sanitize element mapping digits or symbols
+                    # Clean the element string
                     element = ''.join([i for i in element if i.isalpha()]).upper()
                     if not element:
                         element = "C" # Safe generic fallback assignment
-                        
-                    # Write out structured line adding generic charge space (+0.000) and element flags
-                    pdbqt.write(f"{line[:70]}    +0.000 {element:<2}\n")
+                    
+                    # AutoDock treats aromatic carbons differently
+                    atom_name = line[12:16].strip()
+                    if element == "C" and "AR" in atom_name.upper():
+                        element = "A"
+
+                    # Slice precisely up to column 66 (coordinates end)
+                    coord_part = line[:66]
+                    
+                    # Enforce strict column alignment layout:
+                    # Columns 67-70: Blank/Occupancy
+                    # Columns 71-76: Partial Charge (+0.00)
+                    # Columns 78-79: AutoDock Atom Type (Left justified)
+                    pdbqt.write(f"{coord_part:<66}  0.00  +0.000 {element:<2}\n")
+                    
                 elif line.startswith("TER"):
                     pdbqt.write("TER\n")
             pdbqt.write("ENDMDL\n")
@@ -68,6 +80,7 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt"):
 # --- LIGAND MOLECULAR GENERATION ---
 
 def convert_smiles_to_pdbqt(smiles_string, output_filename="ligand.pdbqt"):
+    """Converts SMILES to 3D PDBQT with strict column alignment formatting."""
     try:
         mol = Chem.MolFromSmiles(smiles_string)
         if mol is None:
@@ -85,8 +98,15 @@ def convert_smiles_to_pdbqt(smiles_string, output_filename="ligand.pdbqt"):
         with open(temp_pdb, "r") as pdb_file, open(output_filename, "w") as pdbqt_file:
             for line in pdb_file:
                 if line.startswith(("ATOM", "HETATM")):
-                    atom_type = line[76:78].strip()
-                    pdbqt_file.write(f"{line[:70]}    +0.000 {atom_type}\n")
+                    element = line[76:78].strip()
+                    if not element:
+                        element = line[12:14].strip()
+                    element = ''.join([i for i in element if i.isalpha()]).upper()
+                    if not element:
+                        element = "C"
+                        
+                    coord_part = line[:66]
+                    pdbqt_file.write(f"{coord_part:<66}  0.00  +0.000 {element:<2}\n")
         
         if os.path.exists(temp_pdb):
             os.remove(temp_pdb)
@@ -122,14 +142,12 @@ st.write("Streamline protein preparation via direct PDB lookup or standard file 
 
 col_params, col_visual = st.columns([1, 1])
 
-# Global state tracker variables for prepared target structure pathing
 target_ready = False
 prepared_receptor_path = "protein.pdbqt"
 
 with col_params:
     st.header("1. Target Protein Setup")
     
-    # Toggle interface logic between remote network streams or manual disk uploads
     protein_source = st.radio("Choose Protein Input Method:", ["Type 4-Letter PDB ID", "Upload File (.pdb or .pdbqt)"])
     
     if protein_source == "Type 4-Letter PDB ID":
@@ -162,7 +180,6 @@ with col_params:
                 else:
                     st.error(f"Format Conversion Error: {err_msg}")
             else:
-                # Direct assignment route if file uploaded is already formatted correctly as .pdbqt
                 os.replace(temp_upload_path, prepared_receptor_path)
                 st.success("Valid coordinate format loaded directly.")
                 target_ready = True
@@ -202,7 +219,6 @@ with col_visual:
         if os.path.exists(prepared_receptor_path):
             with open(prepared_receptor_path, "r") as f:
                 protein_data = f.read()
-            # Render larger proteins using ribbon layouts for clarity over simple raw sticks
             render_molecule_html(protein_data, style_type="cartoon", scheme="spectrum")
 
     # --- ACTION EXECUTION BOUNDARY ---
@@ -219,11 +235,9 @@ with col_visual:
             ]
             
             try:
-                # Capture standard text outputs directly from system thread process execution
                 process = subprocess.run(vina_command, capture_output=True, text=True, check=True)
                 st.success("Docking processing calculations completed successfully!")
                 
-                # The output evaluation logs are fetched straight from standard memory stream
                 if process.stdout:
                     st.subheader("📊 Vina Scoring Report")
                     st.text_area(
