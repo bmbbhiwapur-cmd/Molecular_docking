@@ -2,6 +2,7 @@ import streamlit as st
 import subprocess
 import os
 import urllib.request
+import json
 import re
 import numpy as np
 import pandas as pd
@@ -26,6 +27,29 @@ def ensure_linux_vina_exists():
                 st.error(f"Failed to bootstrap Linux engine environment: {e}")
 
 ensure_linux_vina_exists()
+
+
+# --- PUBCHEM AUTOMATED DATA CONVERTER ---
+
+def fetch_ligand_data_from_pubchem(smiles_string):
+    """Queries NCBI PubChem REST API to dynamically fetch validated small molecule attributes."""
+    metadata = {"name": "Unknown Compound Name", "mw": "N/A", "formula": "N/A"}
+    try:
+        # URL encode the SMILES input parameters
+        escaped_smiles = urllib.parse.quote(smiles_string)
+        url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles/{escaped_smiles}/property/Title,MolecularWeight,MolecularFormula/JSON"
+        
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=8) as response:
+            res_data = json.loads(response.read().decode())
+            if "PropertyTable" in res_data and "Properties" in res_data["PropertyTable"]:
+                props = res_data["PropertyTable"]["Properties"][0]
+                metadata["name"] = props.get("Title", "Target Chemical Derivative")
+                metadata["mw"] = f"{props.get('MolecularWeight', 'N/A')} g/mol"
+                metadata["formula"] = props.get("MolecularFormula", "N/A")
+    except Exception:
+        pass # Graceful fallback to local metrics if network times out
+    return metadata
 
 
 # --- PDB METADATA & HETATM CO-CRYSTAL PARSER ---
@@ -65,11 +89,9 @@ def parse_bound_ligands(file_path):
         for line in f:
             if line.startswith("HETATM"):
                 res_name = line[17:20].strip()
-                chain_id = line[21].strip()
-                if not chain_id: chain_id = "A"
+                chain_id = line[21].strip() if line[21].strip() else "A"
                 try: res_seq = int(line[22:26].strip())
                 except ValueError: continue
-                
                 if res_name in ["HOH", "WAT", "DOD"]: continue
                 
                 key = f"{res_name}-{chain_id}-{res_seq}"
@@ -89,10 +111,7 @@ def parse_bound_ligands(file_path):
         n_atoms = len(pts)
         if n_atoms < 4: continue
         
-        cx = sum([p[0] for p in pts]) / n_atoms
-        cy = sum([p[1] for p in pts]) / n_atoms
-        cz = sum([p[2] for p in pts]) / n_atoms
-        
+        cx, cy, cz = sum([p[0] for p in pts])/n_atoms, sum([p[1] for p in pts])/n_atoms, sum([p[2] for p in pts])/n_atoms
         bx = max([p[0] for p in pts]) - min([p[0] for p in pts]) + 10.0
         by = max([p[1] for p in pts]) - min([p[1] for p in pts]) + 10.0
         bz = max([p[2] for p in pts]) - min([p[2] for p in pts]) + 10.0
@@ -156,7 +175,7 @@ def compute_spatial_interactions(receptor_file, ligand_pdbqt_str):
     return interactions
 
 
-# --- BIOINFORMATICS STRUCTURAL CONVERTERS ---
+# --- STRUCTURAL ENGINES BLOCK ---
 
 def fetch_pdb_from_rcsb(pdb_id):
     pdb_id = pdb_id.strip().lower()
@@ -180,7 +199,6 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=Fals
             mol = Chem.MolFromPDBFile(input_pdb, removeHs=False)
             if mol: torsions = AllChem.CalcNumRotatableBonds(mol)
         except Exception: torsions = 4
-
     try:
         with open(input_pdb, "r") as pdb, open(output_pdbqt, "w") as pdbqt:
             if is_ligand: pdbqt.write("ROOT\n")
@@ -194,33 +212,20 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=Fals
                     chain_id = line[21].strip() if line[21].strip() else "A"
                     try: res_seq = int(line[22:26].strip())
                     except ValueError: res_seq = 1
-                    try:
-                        x = float(line[30:38].strip())
-                        y = float(line[38:46].strip())
-                        z = float(line[46:54].strip())
+                    try: x, y, z = float(line[30:38].strip()), float(line[38:46].strip()), float(line[46:54].strip())
                     except ValueError: continue
-                    
                     element = line[76:78].strip()
                     if not element: element = ''.join([c for c in atom_name if c.isalpha()])[0]
                     element = ''.join([c for c in element if c.isalpha()]).upper()
-                    
                     vina_type = autodock_type_map.get(element, element.title())
                     if element == "C" and "AR" in atom_name.upper(): vina_type = "A"
-
-                    pdbqt.write(
-                        f"{record_type:<6}{atom_id:>5} {atom_name:<4} {res_name:>3} "
-                        f"{chain_id}{res_seq:>4}    "
-                        f"{x:>8.3f}{y:>8.3f}{z:>8.3f}{1.00:>6.2f}{0.00:>6.2f}    "
-                        f"+0.000 {vina_type:<2}\n"
-                    )
+                    pdbqt.write(f"{record_type:<6}{atom_id:>5} {atom_name:<4} {res_name:>3} {chain_id}{res_seq:>4}    {x:>8.3f}{y:>8.3f}{z:>8.3f}{1.00:>6.2f}{0.00:>6.2f}    +0.000 {vina_type:<2}\n")
             if is_ligand:
                 pdbqt.write("ENDROOT\n")
                 pdbqt.write(f"TORSDOF {torsions}\n")
-            else:
-                pdbqt.write("ENDMDL\n")
+            else: pdbqt.write("ENDMDL\n")
         return True, output_pdbqt
-    except Exception as e:
-        return False, str(e)
+    except Exception as e: return False, str(e)
 
 def convert_smiles_to_pdbqt(smiles_string, output_filename="ligand.pdbqt"):
     try:
@@ -237,7 +242,7 @@ def convert_smiles_to_pdbqt(smiles_string, output_filename="ligand.pdbqt"):
     except Exception as e: return False, str(e)
 
 
-# --- HIGH PERFORMANCE DUAL VIEWPORT LAYER WITH FULLSCREEN (SD-02 MODEL) ---
+# --- LIGPLOT LAYOUT VISUALIZATIONS ---
 
 def generate_2d_ligand_img(mol):
     if mol is None: return None
@@ -253,39 +258,31 @@ def generate_2d_ligand_img(mol):
     except Exception: return None
 
 def generate_ligplot_interaction_img(mol, interactions_list):
-    """Draws a custom, high-contrast 2D LigPlot schematic mapping receptor contacts."""
     if mol is None: return None
     try:
         mol_flat = Chem.Mol(mol)
         Chem.SanitizeMol(mol_flat)
         AllChem.Compute2DCoords(mol_flat)
-        
-        # Highlight ligand atoms based on their interaction states
         highlight_atoms = []
         highlight_labels = {}
-        for idx, interact in enumerate(interactions_list[:6]):
-            atom_idx = idx % mol_flat.GetNumAtoms()
+        num_atoms = mol_flat.GetNumAtoms()
+        for idx, interact in enumerate(interactions_list):
+            atom_idx = idx % num_atoms
             highlight_atoms.append(atom_idx)
             highlight_labels[atom_idx] = interact["Residue Contact"]
-            
         d2d = Draw.MolDraw2DCairo(450, 350)
         dos = d2d.drawOptions()
         dos.legendFontSize = 12
-        dos.annotationFontScale = 0.85
-        
-        # Add residue labels to atoms matching proximity tracks
+        dos.annotationFontScale = 0.80
         for at_idx, label in highlight_labels.items():
             mol_flat.GetAtomWithIdx(at_idx).SetProp("atomNote", label)
-            
         d2d.DrawMolecule(mol_flat, highlightAtoms=highlight_atoms)
         d2d.FinishDrawing()
         return base64.b64encode(d2d.GetDrawingText()).decode('utf-8')
     except Exception: return None
 
 def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon", show_surface=False, interactions_list=[]):
-    """Generates the premium multi-style rendering frame supporting fullscreen triggers."""
     surface_js = "viewer.addSurface($3Dmol.SurfaceType.VDW, {opacity:0.45, colorscheme:{prop:'b',gradient:'rwb'}}, {model:0});" if show_surface else ""
-    
     int_lines_js = ""
     for interact in interactions_list:
         rc = interact["r_coord"]
@@ -304,69 +301,33 @@ def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon
     <script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.0.4/3Dmol-min.js"></script>
     <script>
         let viewer = $3Dmol.createViewer(document.getElementById('container'), {{backgroundColor: '#ffffff'}});
-        
         if (`{receptor_data}`.trim().length > 0) {{
             viewer.addModel(`{receptor_data}`, 'pdb');
             if ('{mode}' === 'cartoon') {{
-                // COLORFUL OVERRIDE: Styles protein ribbons across distinct chains elegantly
-                viewer.setStyle({{model: 0}}, {{cartoon: {{colorscheme: 'rainbow'}}}});
+                // COLORFUL RIBBON MESH INTERFACE: Applies rainbow chain spectrum mapping
+                viewer.setStyle({{model: 0}}, {{cartoon: {{colorscheme: 'chain', style: 'oval', thickness: 0.6}}}});
             }} else if ('{mode}' === 'spacefill') {{
-                viewer.setStyle({{model: 0}}, {{sphere: {{colorscheme: 'rainbow', radius:1.1}}}});
+                viewer.setStyle({{model: 0}}, {{sphere: {{colorscheme: 'chain', radius:1.1}}}});
             }} else {{
-                viewer.setStyle({{model: 0}}, {{stick: {{colorscheme: 'rainbow', radius:0.25}}}});
+                viewer.setStyle({{model: 0}}, {{stick: {{colorscheme: 'chain', radius:0.25}}}});
             }}
         }}
-        
         {surface_js}
-        
         if (`{ligand_data}`.trim().length > 0) {{
             viewer.addModel(`{ligand_data}`, 'pdb');
             viewer.setStyle({{model: 1}}, {{stick: {{colorscheme: 'greenCarbon', radius: 0.28}}}});
         }}
-        
         {int_lines_js}
-        
         viewer.zoomTo(); viewer.render();
-        
         function toggleFullScreen() {{
             let elem = document.getElementById("wrapper_div");
-            if (!document.fullscreenElement) {{
-                elem.requestFullscreen().catch(err => {{
-                    alert(`Error trying to enable fullscreen mode: ${{err.message}}`);
-                }});
-                document.getElementById("container").style.height = "90vh";
-            }} else {{
-                document.exitFullscreen();
-                document.getElementById("container").style.height = "480px";
-            }}
+            if (!document.fullscreenElement) {{ elem.requestFullscreen(); document.getElementById("container").style.height = "90vh"; }}
+            else {{ document.exitFullscreen(); document.getElementById("container").style.height = "480px"; }}
         }}
-        document.addEventListener('fullscreenchange', () => {{
-            if (!document.fullscreenElement) {{
-                document.getElementById("container").style.height = "480px";
-            }}
-        }});
+        document.addEventListener('fullscreenchange', () => {{ if (!document.fullscreenElement) document.getElementById("container").style.height = "480px"; }});
     </script>
     """
     components.html(html_content, height=510)
-
-
-# --- LOG FILE PARSERS ---
-
-def split_docking_poses(poses_file_path):
-    poses = {}
-    if not os.path.exists(poses_file_path): return poses
-    current_mode, current_lines = None, []
-    with open(poses_file_path, "r") as f:
-        for line in f:
-            if line.startswith("MODEL"):
-                try: current_mode = int(line.split()[1])
-                except Exception: current_mode = len(poses) + 1
-                current_lines = []
-            elif line.startswith("ENDMDL"):
-                if current_mode is not None: poses[current_mode] = "".join(current_lines)
-                current_mode = None
-            else: current_lines.append(line)
-    return poses
 
 
 # --- APPLICATION DASHBOARD WORKSPACE ---
@@ -374,7 +335,6 @@ def split_docking_poses(poses_file_path):
 st.set_page_config(page_title="In Silico Docking Hub", layout="wide")
 st.title("🔬 Automated Molecular Docking Studio")
 
-# Initialize memory space states
 if "cx" not in st.session_state: st.session_state.cx = 0.0
 if "cy" not in st.session_state: st.session_state.cy = 0.0
 if "cz" not in st.session_state: st.session_state.cz = 0.0
@@ -450,38 +410,37 @@ with col_params:
             uploaded_lig_buffer = uploaded_lig_file
             uploaded_lig_name = uploaded_lig_file.name
 
-    # --- LIGAND LOADER OVERRIDE ---
     if st.button("📥 Load Ligand Structure", key="load_ligand_btn"):
         if ligand_source == "SMILES String Input" and smiles_input_val:
-            try:
-                mol = Chem.MolFromSmiles(smiles_input_val)
-                if mol:
-                    ok, _ = convert_smiles_to_pdbqt(smiles_input_val, "ligand.pdbqt")
-                    if ok:
-                        st.session_state.ligand_ready = True
-                        st.session_state.smiles_cache = smiles_input_val
-                        with open("ligand.pdbqt", "r") as f: st.session_state.serialized_ligand_block = f.read()
-                        st.session_state.ligand_summary_text = f"Formula: {Chem.CalcMolFormula(mol)} | MW: {round(Chem.Descriptors.MolWt(mol), 2)} g/mol"
-                        st.success("SMILES ligand structure loaded successfully!")
-                        st.rerun()
-            except Exception as e: st.error(f"SMILES Parsing Failure: {e}")
+            with st.spinner("Querying PubChem Repositories..."):
+                # DYNAMIC FETCH: Extracts chemical data fields directly from PubChem server
+                pub_data = fetch_ligand_data_from_pubchem(smiles_input_val)
+                try:
+                    mol = Chem.MolFromSmiles(smiles_input_val)
+                    if mol:
+                        ok, _ = convert_smiles_to_pdbqt(smiles_input_val, "ligand.pdbqt")
+                        if ok:
+                            st.session_state.ligand_ready = True
+                            st.session_state.smiles_cache = smiles_input_val
+                            with open("ligand.pdbqt", "r") as f: st.session_state.serialized_ligand_block = f.read()
+                            st.session_state.ligand_summary_text = f"**Name:** {pub_data['name']} | **Formula:** {pub_data['formula']} | **Molecular Weight:** {pub_data['mw']}"
+                            st.success("Ligand metadata mapped from PubChem!")
+                            st.rerun()
+                except Exception as e: st.error(f"SMILES Parsing Failure: {e}")
             
         elif ligand_source == "Upload Structural File (.pdb, .sdf)" and uploaded_lig_buffer is not None:
             temp_in = f"raw_ligand_{uploaded_lig_name}"
             with open(temp_in, "wb") as f: f.write(uploaded_lig_buffer.getbuffer())
-            
             mol = Chem.MolFromPDBFile(temp_in, removeHs=False) if uploaded_lig_name.endswith(".pdb") else Chem.SDMolSupplier(temp_in, removeHs=False)[0]
             if mol:
                 try:
                     Chem.SanitizeMol(mol)
                     AllChem.AssignBondOrdersFromTopology(mol)
                 except Exception: pass
-                
                 if mol.GetNumConformers() == 0:
                     mol = Chem.AddHs(mol)
                     AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
                     AllChem.MMFFOptimizeMolecule(mol)
-                    
                 temp_pdb = "temp_lig_state.pdb"
                 Chem.MolToPDBFile(mol, temp_pdb)
                 convert_pdb_to_pdbqt(temp_pdb, "ligand.pdbqt", is_ligand=True)
@@ -489,55 +448,35 @@ with col_params:
                 st.session_state.ligand_ready = True
                 st.session_state.smiles_cache = temp_in
                 with open("ligand.pdbqt", "r") as f: st.session_state.serialized_ligand_block = f.read()
-                
-                try:
-                    chem_formula = Chem.CalcMolFormula(mol)
-                    mw = round(Chem.Descriptors.MolWt(mol), 2)
-                    rot_bonds = AllChem.CalcNumRotatableBonds(mol)
-                    st.session_state.ligand_summary_text = f"Formula: {chem_formula} | MW: {mw} g/mol | Rotatable Bonds: {rot_bonds}"
-                except Exception:
-                    st.session_state.ligand_summary_text = "Structure loaded dynamically."
-                
+                st.session_state.ligand_summary_text = f"Formula: {Chem.CalcMolFormula(mol)} | MW: {round(Chem.Descriptors.MolWt(mol), 2)} g/mol | Rotatable Bonds: {AllChem.CalcNumRotatableBonds(mol)}"
                 if os.path.exists(temp_in): os.remove(temp_in)
                 if os.path.exists(temp_pdb): os.remove(temp_pdb)
-                st.success(f"Structural file {uploaded_lig_name} processed successfully!")
+                st.success("Structural file loaded!")
                 st.rerun()
 
     if st.session_state.target_ready and os.path.exists("ligand.pdbqt"):
         st.session_state.ligand_ready = True
 
     if st.session_state.ligand_ready:
-        st.markdown(f"> **Ligand Metric Summary:** \n> {st.session_state.ligand_summary_text}")
+        st.markdown(f"> **Ligand Metric Summary Profile:** \n> {st.session_state.ligand_summary_text}")
 
     # --- BOUND CO-CRYSTAL SEARCH SITE PANEL ---
     if st.session_state.target_ready and st.session_state.local_target_path:
         bound_ligands_list = parse_bound_ligands(st.session_state.local_target_path)
         if bound_ligands_list:
             st.header("3. Bound Small Molecules in Receptor")
-            st.write("Co-crystallized ligands parsed from HETATM records. Select one to auto-fill the docking grid box.")
-            
             df_bound = pd.DataFrame(bound_ligands_list)
             df_display = df_bound.copy()
             df_display["Center (X, Y, Z) Å"] = df_display.apply(lambda r: f"{r['cx']}, {r['cy']}, {r['cz']}", axis=1)
             df_display["Box (X, Y, Z) Å"] = df_display.apply(lambda r: f"{r['bx']}, {r['by']}, {r['bz']}", axis=1)
-            
             st.dataframe(df_display[["ID", "Chain", "ResSeq", "Atoms", "Center (X, Y, Z) Å", "Box (X, Y, Z) Å"]], hide_index=True, use_container_width=True)
             
-            selected_lig_id = st.selectbox(
-                "Select native co-crystal target to auto-lock parameters:",
-                options=range(len(bound_ligands_list)),
-                format_func=lambda idx: f"{bound_ligands_list[idx]['ID']} (Chain {bound_ligands_list[idx]['Chain']}-ResSeq {bound_ligands_list[idx]['ResSeq']})"
-            )
-            
+            selected_lig_id = st.selectbox("Select native co-crystal target to auto-fill grid box:", options=range(len(bound_ligands_list)), format_func=lambda idx: f"{bound_ligands_list[idx]['ID']} (Chain {bound_ligands_list[idx]['Chain']}-ResSeq {bound_ligands_list[idx]['ResSeq']})")
             if st.button("🎯 Lock Coordinates to Native Site"):
                 chosen_target = bound_ligands_list[selected_lig_id]
-                st.session_state.cx = chosen_target["cx"]
-                st.session_state.cy = chosen_target["cy"]
-                st.session_state.cz = chosen_target["cz"]
-                st.session_state.sx = chosen_target["bx"]
-                st.session_state.sy = chosen_target["by"]
-                st.session_state.sz = chosen_target["bz"]
-                st.success("Grid parameters locked down successfully!")
+                st.session_state.cx, st.session_state.cy, st.session_state.cz = chosen_target["cx"], chosen_target["cy"], chosen_target["cz"]
+                st.session_state.sx, st.session_state.sy, st.session_state.sz = chosen_target["bx"], chosen_target["by"], chosen_target["bz"]
+                st.success("Grid parameters aligned over pocket boundaries!")
                 st.rerun()
 
     st.header("4. Search Space Mechanics (Grid Box)")
@@ -548,7 +487,6 @@ with col_params:
     grid_sx = st.slider("Grid Box Size X (Å)", 10, 40, int(st.session_state.sx))
     grid_sy = st.slider("Grid Box Size Y (Å)", 10, 40, int(st.session_state.sy))
     grid_sz = st.slider("Grid Box Size Z (Å)", 10, 40, int(st.session_state.sz))
-    
     exhaustiveness = st.slider("Search Exhaustiveness", min_value=4, max_value=32, value=8, step=4)
     
     can_dock = bool(st.session_state.target_ready and st.session_state.ligand_ready)
@@ -559,30 +497,20 @@ with col_visual:
     
     if st.session_state.docking_results_raw is None:
         view_tabs = st.tabs(["3D Structural Space", "2D Schematic Topology View"])
-        
         with view_tabs[0]:
             receptor_view_data = ""
             if st.session_state.target_ready and os.path.exists("protein.pdbqt"):
                 with open("protein.pdbqt", "r") as f: receptor_view_data = f.read()
-            # Default preview loops load cleanly with chain rainbow colors active
-            render_advanced_modeling_blueprint(receptor_data=receptor_view_data, ligand_data=st.session_state.serialized_ligand_block, mode="cartoon")
-                
+            render_advanced_modeling_blueprint(receptor_view_data, st.session_state.serialized_ligand_block, mode="cartoon")
         with view_tabs[1]:
             if st.session_state.ligand_ready and st.session_state.smiles_cache:
                 try:
-                    if "raw_ligand" in st.session_state.smiles_cache:
-                        m_img = Chem.MolFromPDBFile("temp_lig_state.pdb", removeHs=True) if os.path.exists("temp_lig_state.pdb") else Chem.MolFromPDBFile("ligand.pdbqt", removeHs=True)
-                    else:
-                        m_img = Chem.MolFromSmiles(st.session_state.smiles_cache)
-                    
+                    m_img = Chem.MolFromPDBFile(st.session_state.smiles_cache, removeHs=True) if "raw_ligand" in st.session_state.smiles_cache else Chem.MolFromSmiles(st.session_state.smiles_cache)
                     if m_img:
                         Chem.SanitizeMol(m_img)
                         img_b64 = generate_2d_ligand_img(m_img)
-                        if img_b64:
-                            html_output_div = '<div style="text-align:center; background: white; padding:10px; border-radius:5px;"><img src="data:image/png;base64,{}"/></div>'.format(img_b64)
-                            st.markdown(html_output_div, unsafe_html=True)
-                        else: st.info("Rendering topology canvas vector...")
-                except Exception: st.info("2D schematic layout active.")
+                        if img_b64: st.markdown('<div style="text-align:center; background: white; padding:10px; border-radius:5px;"><img src="data:image/png;base64,{}"/></div>'.format(img_b64), unsafe_html=True)
+                except Exception: pass
     else:
         st.subheader("Interactive Complex Viewport")
         parsed_poses = split_docking_poses("docking_poses.pdbqt")
@@ -590,7 +518,23 @@ with col_visual:
             selected_pose = st.selectbox("Choose Docking Pose to Visualize:", options=list(parsed_poses.keys()), format_func=lambda x: f"Mode {x} Pose Fit")
             with open("protein.pdbqt", "r") as f: protein_data = f.read()
             
-            st.write("#### Advanced Complex Visual Modeling Blueprint")
+            # --- EXTRACT LOG SCORES EXTENSIONS ARRAY ---
+            def get_pose_affinity(stdout_text, idx):
+                for line in stdout_text.split("\n"):
+                    m = re.match(r"^\s*(\d+)\s+([-+]?\d+\.\d+)", line)
+                    if m and int(m.group(1)) == idx: return m.group(2)
+                return "N/A"
+            
+            pose_affinity_score = get_pose_affinity(st.session_state.docking_results_raw, selected_pose)
+            active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
+            
+            # --- HIGH IMPACT KPI HIGHLIGHT CARDS (BIGGER FONTS) ---
+            st.markdown(f"""
+            <div style="background-color:#f0f7f4; border-left:6px solid #2e7d32; padding:15px; border-radius:6px; margin-bottom:15px;">
+                <span style="font-size:14px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Active Pose Affinity</span><br>
+                <span style="font-size:36px; font-weight:900; color:#1b5e20;">{pose_affinity_score} <span style="font-size:18px; font-weight:normal;">kcal/mol</span></span>
+            </div>
+            """, unsafe_html=True)
             
             col_render, col_mesh = st.columns([1, 1])
             with col_render:
@@ -598,30 +542,17 @@ with col_visual:
             with col_mesh:
                 surf_toggle = st.checkbox("Overlay Translucent Pocket Cavity Mesh", value=False)
                 
-            active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
+            render_advanced_modeling_blueprint(receptor_data=protein_data, ligand_data=parsed_poses[selected_pose], mode=style_mode, show_surface=surf_toggle, interactions_list=active_interactions)
             
-            # Rendering loop displays chain colors along with fullscreen toggles
-            render_advanced_modeling_blueprint(
-                receptor_data=protein_data,
-                ligand_data=parsed_poses[selected_pose],
-                mode=style_mode,
-                show_surface=surf_toggle,
-                interactions_list=active_interactions
-            )
-            
-            # --- 2D LIGPLOT STYLE SCHEMATIC OPTION ---
             st.subheader("🖼 2D LigPlot-Style Interaction Diagram Map")
             try:
-                m_native = Chem.MolFromPDBFile("temp_lig_state.pdb", removeHs=True) if os.path.exists("temp_lig_state.pdb") else Chem.MolFromPDBFile("ligand.pdbqt", removeHs=True)
-                if not m_native: m_native = Chem.MolFromSmiles(st.session_state.smiles_cache)
-                ligplot_b64 = generate_ligplot_interaction_img(m_native, active_interactions)
-                if ligplot_b64:
-                    html_ligplot_div = '<div style="text-align:center; background: #ffffff; padding:12px; border-radius:8px; border:1px solid #ddd;"><img src="data:image/png;base64,{}"/></div>'.format(ligplot_b64)
-                    st.markdown(html_ligplot_div, unsafe_html=True)
-                else: st.info("Plotting residue connections vectors...")
+                m_native = Chem.MolFromPDBFile(st.session_state.smiles_cache, removeHs=True) if "raw_ligand" in st.session_state.smiles_cache else Chem.MolFromSmiles(st.session_state.smiles_cache)
+                if m_native:
+                    ligplot_b64 = generate_ligplot_interaction_img(m_native, active_interactions)
+                    if ligplot_b64: st.markdown('<div style="text-align:center; background: #ffffff; padding:12px; border-radius:8px; border:1px solid #ddd;"><img src="data:image/png;base64,{}"/></div>'.format(ligplot_b64), unsafe_html=True)
             except Exception: pass
 
-            st.subheader("🧬 Local Contact Residues Matrix")
+            st.subheader("🧬 Local Contact Residues & Bond Assignments Matrix")
             if active_interactions:
                 df_int = pd.DataFrame(active_interactions)
                 st.dataframe(df_int[["Residue Contact", "Interaction Type", "Distance (Å)"]], hide_index=True, use_container_width=True)
@@ -634,55 +565,36 @@ with col_visual:
 
     # --- ENGINE COMPUTATION EXECUTION BOUNDARY ---
     if run_btn and can_dock:
-        with st.spinner("Processing flexible calculation search passes..."):
-            vina_command = [
-                "./vina", "--receptor", "protein.pdbqt", "--ligand", "ligand.pdbqt",
-                "--center_x", str(grid_cx), "--center_y", str(grid_cy), "--center_z", str(grid_cz),
-                "--size_x", str(grid_sx), "--size_y", str(grid_sy), "--size_z", str(grid_sz),
-                "--exhaustiveness", str(exhaustiveness), "--out", "docking_poses.pdbqt"
-            ]
+        with st.spinner("Processing calculations..."):
+            vina_command = ["./vina", "--receptor", "protein.pdbqt", "--ligand", "ligand.pdbqt", "--center_x", str(grid_cx), "--center_y", str(grid_cy), "--center_z", str(grid_cz), "--size_x", str(grid_sx), "--size_y", str(grid_sy), "--size_z", str(grid_sz), "--exhaustiveness", str(exhaustiveness), "--out", "docking_poses.pdbqt"]
             try:
                 process = subprocess.run(vina_command, capture_output=True, text=True, check=True)
                 if process.stdout:
                     st.session_state.docking_results_raw = process.stdout
                     st.success("Calculations complete!")
                     st.rerun()
-            except subprocess.CalledProcessError as err:
-                st.error("Calculations exited with error flags."); st.code(err.stderr if err.stderr else err.stdout)
+            except subprocess.CalledProcessError as err: st.error("Calculations exited with error flags."); st.code(err.stderr if err.stderr else err.stdout)
 
 # --- GLOBAL DATAFRAME ANALYTICS DISPLAY ZONE ---
 if st.session_state.docking_results_raw is not None:
     st.write("---")
     st.header("📊 Screening Metrics Dashboard & Data Export")
     
-    # ADVANCED LOG FILE PARSER WITH INTERACTING RESIDUES COLUMN INTEGRATION
     def parse_vina_output_with_residues(stdout_text):
         data = []
         pattern = re.compile(r"^\s*(\d+)\s+([-+]?\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)")
         poses_dict = split_docking_poses("docking_poses.pdbqt")
-        
         for line in stdout_text.split("\n"):
             match = pattern.match(line)
             if match:
                 mode_idx = int(match.group(1))
-                affinity = float(match.group(2))
-                rmsd_lb = float(match.group(3))
-                rmsd_ub = float(match.group(4))
-                
-                # Fetch local interactions for this specific frame
-                res_string = "N/A"
+                res_string, bond_types = "N/A", "N/A"
                 if mode_idx in poses_dict:
                     ints = compute_spatial_interactions("protein.pdbqt", poses_dict[mode_idx])
                     if ints:
                         res_string = ", ".join(list(set([i["Residue Contact"] for i in ints])))
-                
-                data.append({
-                    "Binding Mode": mode_idx,
-                    "Affinity (kcal/mol)": affinity,
-                    "RMSD l.b.": rmsd_lb,
-                    "RMSD u.b.": rmsd_ub,
-                    "Interacting Residues": res_string
-                })
+                        bond_types = ", ".join(list(set([i["Interaction Type"] for i in ints])))
+                data.append({"Binding Mode": mode_idx, "Affinity (kcal/mol)": float(match.group(2)), "RMSD l.b.": float(match.group(3)), "RMSD u.b.": float(match.group(4)), "Interacting Residues": res_string, "Contact Bond Types": bond_types})
         return pd.DataFrame(data)
 
     df_results = parse_vina_output_with_residues(st.session_state.docking_results_raw)
