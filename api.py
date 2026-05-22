@@ -6,12 +6,10 @@ import json
 import re
 import numpy as np
 import pandas as pd
-from rdkit import Chem
-from rdkit.Chem import AllChem
-from rdkit.Chem import Draw
 import streamlit.components.v1 as components
-import base64from rdkit import Chem
-from rdkit.Chem import AllChem, Draw, Descriptors  # Added Descriptors here
+import base64
+from rdkit import Chem
+from rdkit.Chem import AllChem, Draw, Descriptors
 
 # --- CLOUD CONTEXT ENGINE MANAGEMENT ---
 
