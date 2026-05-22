@@ -320,8 +320,10 @@ def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon
 # --- APPLICATION DASHBOARD WORKSPACE ---
 
 st.set_page_config(page_title="In Silico Docking Hub", layout="wide")
-st.title("🔬 Automated Molecular Docking Studio")
-
+st.title("🔬 InSilico BioSphere - Docking + ADME + Redesign")
+st.markdown("""
+**InSilico BioSphere** | Developed by: Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, Shivaji Science College, Nagpur, India | Contact: sarangresearch@gmail.com
+""")
 # Initialize states safely
 if "cx" not in st.session_state: st.session_state.cx = 0.0
 if "cy" not in st.session_state: st.session_state.cy = 0.0
