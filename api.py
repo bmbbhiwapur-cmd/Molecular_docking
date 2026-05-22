@@ -538,14 +538,14 @@ with col_visual:
             pose_affinity_score = get_pose_affinity(st.session_state.docking_results_raw, selected_pose)
             active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
             
-            # FIXED DECOUPLED FORMAT CONTAINER: Extracted styling mapping from raw f-string boundaries safely
+            # CRITICAL CONVERSION FIX: Replaced st.markdown with st.html to prevent curly brace compiler leak errors
             html_metric_card = """
-            <div style="background-color:#f0f7f4; border-left:6px solid #2e7d32; padding:15px; border-radius:6px; margin-bottom:15px;">
+            <div style="background-color:#f0f7f4; border-left:6px solid #2e7d32; padding:15px; border-radius:6px; margin-bottom:15px; font-family:sans-serif;">
                 <span style="font-size:14px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Active Pose Affinity</span><br>
                 <span style="font-size:36px; font-weight:900; color:#1b5e20;">{} <span style="font-size:18px; font-weight:normal;">kcal/mol</span></span>
             </div>
             """.format(pose_affinity_score)
-            st.markdown(html_metric_card, unsafe_html=True)
+            st.html(html_metric_card)
             
             col_render, col_mesh = st.columns([1, 1])
             with col_render:
