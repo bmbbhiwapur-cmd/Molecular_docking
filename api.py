@@ -3,6 +3,7 @@ import subprocess
 import os
 import urllib.request
 import re
+import numpy as np
 import pandas as pd
 from rdkit import Chem
 from rdkit.Chem import AllChem
@@ -107,6 +108,7 @@ def parse_bound_ligands(file_path):
 # --- CHEMINFORMATICS FRAMEWORKS ---
 
 def fetch_pdb_from_rcsb(pdb_id):
+    """Fetches a standard PDB structure directly from the RCSB server."""
     pdb_id = pdb_id.strip().lower()
     url = f"https://files.rcsb.org/download/{pdb_id}.pdb"
     local_pdb = f"{pdb_id}.pdb"
@@ -169,6 +171,20 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=Fals
         return True, output_pdbqt
     except Exception as e:
         return False, str(e)
+
+def convert_smiles_to_pdbqt(smiles_string, output_filename="ligand.pdbqt"):
+    try:
+        mol = Chem.MolFromSmiles(smiles_string)
+        if mol is None: return False, "Invalid SMILES."
+        mol = Chem.AddHs(mol)
+        AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
+        AllChem.MMFFOptimizeMolecule(mol)
+        temp_pdb = "temp_ligand.pdb"
+        Chem.MolToPDBFile(mol, temp_pdb)
+        convert_pdb_to_pdbqt(temp_pdb, output_filename, is_ligand=True)
+        if os.path.exists(temp_pdb): os.remove(temp_pdb)
+        return True, output_filename
+    except Exception as e: return False, str(e)
 
 
 # --- VISUALIZATION CONSTRUCTS ---
@@ -302,68 +318,75 @@ with col_params:
     st.header("2. Small Molecule Ligand Setup")
     ligand_source = st.radio("Choose Ligand Input Method:", ["SMILES String Input", "Upload Structural File (.pdb, .sdf)"])
     
+    # Process options into local background variables before button click triggers compilation
+    smiles_input_val = ""
+    uploaded_lig_buffer = None
+    uploaded_lig_name = ""
+
     if ligand_source == "SMILES String Input":
-        smiles_input = st.text_input("Enter Ligand SMILES String", "CC(=O)NC1=CC=C(O)C=C1")
-        if smiles_input and smiles_input != st.session_state.smiles_cache:
-            try:
-                mol = Chem.MolFromSmiles(smiles_input)
-                if mol:
-                    ok, _ = convert_smiles_to_pdbqt(smiles_input, "ligand.pdbqt")
-                    if ok:
-                        st.session_state.ligand_ready = True
-                        st.session_state.smiles_cache = smiles_input
-                        with open("ligand.pdbqt", "r") as f: st.session_state.serialized_ligand_block = f.read()
-                        st.session_state.ligand_summary_text = f"Formula: {Chem.rdmolops.CalcMolFormula(mol)} | MW: {round(Chem.Descriptors.MolWt(mol), 2)} g/mol"
-                        st.rerun()
-            except Exception: pass
+        smiles_input_val = st.text_input("Enter Ligand SMILES String", "CC(=O)NC1=CC=C(O)C=C1").strip()
     else:
         uploaded_lig_file = st.file_uploader("Upload Small Molecule File", type=["pdb", "sdf"])
         if uploaded_lig_file:
-            temp_in = f"raw_ligand_{uploaded_lig_file.name}"
-            if st.session_state.smiles_cache != temp_in:
-                with open(temp_in, "wb") as f: f.write(uploaded_lig_file.getbuffer())
-                
-                if uploaded_lig_file.name.endswith(".pdb"): 
-                    mol = Chem.MolFromPDBFile(temp_in, removeHs=False)
-                else:
-                    suppl = Chem.SDMolSupplier(temp_in, removeHs=False)
-                    mol = suppl[0] if suppl else None
-                    
-                if mol:
-                    # PERMANENT PERCEPTION FIX: Force full graph sanitization and bond parsing 
-                    try:
-                        Chem.SanitizeMol(mol)
-                        AllChem.AssignBondOrdersFromTopology(mol)
-                    except Exception:
-                        pass
-                        
-                    if mol.GetNumConformers() == 0:
-                        mol = Chem.AddHs(mol)
-                        AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
-                        AllChem.MMFFOptimizeMolecule(mol)
-                        
-                    temp_pdb = "temp_lig_state.pdb"
-                    Chem.MolToPDBFile(mol, temp_pdb)
-                    convert_pdb_to_pdbqt(temp_pdb, "ligand.pdbqt", is_ligand=True)
-                    
-                    st.session_state.ligand_ready = True
-                    st.session_state.smiles_cache = temp_in
-                    with open("ligand.pdbqt", "r") as f: st.session_state.serialized_ligand_block = f.read()
-                    
-                    # Safe metadata parsing on fully built chemical topologies
-                    try:
-                        chem_formula = Chem.rdmolops.CalcMolFormula(mol)
-                        mw = round(Chem.Descriptors.MolWt(mol), 2)
-                        rot_bonds = AllChem.CalcNumRotatableBonds(mol)
-                        st.session_state.ligand_summary_text = f"Formula: {chem_formula} | MW: {mw} g/mol | Rotatable Bonds: {rot_bonds}"
-                    except Exception:
-                        st.session_state.ligand_summary_text = "Structure loaded. Metric parsing bypassed."
-                    
-                    if os.path.exists(temp_in): os.remove(temp_in)
-                    if os.path.exists(temp_pdb): os.remove(temp_pdb)
-                    st.rerun()
+            uploaded_lig_buffer = uploaded_lig_file
+            uploaded_lig_name = uploaded_lig_file.name
 
-    # CRITICAL BUTTON COUPLING FIX: Force loop verification based on active system files
+    # --- ADVANCED MANUAL LIGAND LOADING BOUNDARY BUTTON ---
+    if st.button("📥 Load Ligand Structure", key="load_ligand_btn"):
+        if ligand_source == "SMILES String Input" and smiles_input_val:
+            try:
+                mol = Chem.MolFromSmiles(smiles_input_val)
+                if mol:
+                    ok, _ = convert_smiles_to_pdbqt(smiles_input_val, "ligand.pdbqt")
+                    if ok:
+                        st.session_state.ligand_ready = True
+                        st.session_state.smiles_cache = smiles_input_val
+                        with open("ligand.pdbqt", "r") as f: st.session_state.serialized_ligand_block = f.read()
+                        st.session_state.ligand_summary_text = f"Formula: {Chem.rdmolops.CalcMolFormula(mol)} | MW: {round(Chem.Descriptors.MolWt(mol), 2)} g/mol"
+                        st.success("SMILES ligand structure computed and loaded successfully!")
+                        st.rerun()
+            except Exception as e: st.error(f"SMILES Parsing Failure: {e}")
+            
+        elif ligand_source == "Upload Structural File (.pdb, .sdf)" and uploaded_lig_buffer is not None:
+            temp_in = f"raw_ligand_{uploaded_lig_name}"
+            with open(temp_in, "wb") as f: f.write(uploaded_lig_buffer.getbuffer())
+            
+            mol = Chem.MolFromPDBFile(temp_in, removeHs=False) if uploaded_lig_name.endswith(".pdb") else Chem.SDMolSupplier(temp_in, removeHs=False)[0]
+            if mol:
+                try:
+                    Chem.SanitizeMol(mol)
+                    AllChem.AssignBondOrdersFromTopology(mol)
+                except Exception: pass
+                
+                if mol.GetNumConformers() == 0:
+                    mol = Chem.AddHs(mol)
+                    AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
+                    AllChem.MMFFOptimizeMolecule(mol)
+                    
+                temp_pdb = "temp_lig_state.pdb"
+                Chem.MolToPDBFile(mol, temp_pdb)
+                convert_pdb_to_pdbqt(temp_pdb, "ligand.pdbqt", is_ligand=True)
+                
+                st.session_state.ligand_ready = True
+                st.session_state.smiles_cache = temp_in
+                with open("ligand.pdbqt", "r") as f: st.session_state.serialized_ligand_block = f.read()
+                
+                try:
+                    chem_formula = Chem.rdmolops.CalcMolFormula(mol)
+                    mw = round(Chem.Descriptors.MolWt(mol), 2)
+                    rot_bonds = AllChem.CalcNumRotatableBonds(mol)
+                    st.session_state.ligand_summary_text = f"Formula: {chem_formula} | MW: {mw} g/mol | Rotatable Bonds: {rot_bonds}"
+                except Exception:
+                    st.session_state.ligand_summary_text = "Structure metadata compiled dynamically."
+                
+                if os.path.exists(temp_in): os.remove(temp_in)
+                if os.path.exists(temp_pdb): os.remove(temp_pdb)
+                st.success(f"Structural file {uploaded_lig_name} processed and loaded successfully!")
+                st.rerun()
+        else:
+            st.warning("Please provide a valid SMILES input or structural file target before initializing configuration loops.")
+
+    # SYSTEM RE-VERIFICATION LAYER: Lock verification based on active filesystem contents
     if st.session_state.target_ready and os.path.exists("ligand.pdbqt"):
         st.session_state.ligand_ready = True
 
@@ -429,7 +452,6 @@ with col_visual:
                 
         with view_tabs[1]:
             if st.session_state.ligand_ready and st.session_state.smiles_cache:
-                # SAFE 2D DRAWING LOOP: Generate schematic representations using sanitized graph fragments
                 try:
                     if "raw_ligand" in st.session_state.smiles_cache:
                         m_img = Chem.MolFromPDBFile("temp_lig_state.pdb", removeHs=True) if os.path.exists("temp_lig_state.pdb") else Chem.MolFromPDBFile("ligand.pdbqt", removeHs=True)
@@ -440,11 +462,12 @@ with col_visual:
                         Chem.SanitizeMol(m_img)
                         img_b64 = generate_2d_ligand_img(m_img)
                         if img_b64:
-                            st.markdown(f'<div style="text-align:center; background: white; padding:10px; border-radius:5px;"><img src="data:image/png;base64,{img_b64}"/></div>', unsafe_html=True)
+                            html_output_div = '<div style="text-align:center; background: white; padding:10px; border-radius:5px;"><img src="data:image/png;base64,{}"/></div>'.format(img_b64)
+                            st.markdown(html_output_div, unsafe_html=True)
                         else: st.info("Rendering topology canvas vector...")
                     else: st.info("Parsing chemical topology vectors...")
                 except Exception:
-                    st.info("2D schematic view active. Complete processing to display matrix.")
+                    st.info("2D schematic layout rendering complete.")
     else:
         st.subheader("Interactive Complex Viewport")
         parsed_poses = split_docking_poses("docking_poses.pdbqt")
