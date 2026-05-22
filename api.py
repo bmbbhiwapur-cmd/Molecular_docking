@@ -23,10 +23,9 @@ def ensure_linux_vina_exists():
 ensure_linux_vina_exists()
 
 
-# --- REAL-TIME PROTEIN STRUCTURE FETCHING & CONVERSION ---
+# --- REAL-TIME PROTEIN COUPLING & AUTO-CENTERING ---
 
 def fetch_pdb_from_rcsb(pdb_id):
-    """Fetches a standard PDB structure directly from the RCSB server."""
     pdb_id = pdb_id.strip().lower()
     url = f"https://files.rcsb.org/download/{pdb_id}.pdb"
     local_pdb = f"{pdb_id}.pdb"
@@ -34,46 +33,68 @@ def fetch_pdb_from_rcsb(pdb_id):
         urllib.request.urlretrieve(url, local_pdb)
         return True, local_pdb
     except Exception as e:
-        return False, f"Could not find or download PDB ID '{pdb_id.upper()}'. Check your internet link or ID format."
+        return False, f"Could not find or download PDB ID '{pdb_id.upper()}'."
+
+def calculate_protein_center(input_pdb):
+    """Calculates the geometric center of the protein coordinates to prevent empty grid errors."""
+    x_coords, y_coords, z_coords = [], [], []
+    try:
+        with open(input_pdb, "r") as f:
+            for line in f:
+                if line.startswith(("ATOM", "HETATM")):
+                    try:
+                        x_coords.append(float(line[30:38].strip()))
+                        y_coords.append(float(line[38:46].strip()))
+                        z_coords.append(float(line[46:54].strip()))
+                    except ValueError:
+                        continue
+        if x_coords:
+            return (sum(x_coords)/len(x_coords), 
+                    sum(y_coords)/len(y_coords), 
+                    sum(z_coords)/len(z_coords))
+    except Exception:
+        pass
+    return 0.0, 0.0, 0.0
 
 def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=False):
-    """
-    Parses a standard PDB structural file and builds a compliant PDBQT format.
-    If processing a ligand, it wraps the atomic coordinates inside ROOT/ENDROOT markers.
-    """
     autodock_type_map = {
         "H": "H", "HD": "HD", "HS": "HS", "C": "C", "A": "A", 
         "N": "N", "NA": "NA", "NS": "NS", "O": "O", "OA": "OA", 
         "S": "S", "SA": "SA", "P": "P", "F": "F", 
         "CL": "Cl", "BR": "Br", "I": "I", "ZN": "Zn", "MG": "Mg"
     }
+    torsions = 0
+    if is_ligand:
+        # Programmatically count actual rotatable single bonds using RDKit if available
+        try:
+            mol = Chem.MolFromPDBFile(input_pdb, removeHs=False)
+            if mol:
+                torsions = AllChem.CalcNumRotatableBonds(mol)
+        except Exception:
+            torsions = 4 # Smart fallback guess if parsing struggles
 
     try:
         with open(input_pdb, "r") as pdb, open(output_pdbqt, "w") as pdbqt:
-            # If it's a ligand, Vina strictly requires it to begin with a ROOT tag
             if is_ligand:
                 pdbqt.write("ROOT\n")
 
             for line in pdb:
                 if line.startswith(("ATOM", "HETATM")):
-                    record_type = line[:6].strip()  # ATOM or HETATM
+                    record_type = line[:6].strip()
                     try:
                         atom_id = int(line[6:11].strip())
                     except ValueError:
                         atom_id = 1
                         
-                    atom_name = line[12:16]          # Keep original 4-char space padding
+                    atom_name = line[12:16]
                     res_name = line[17:20].strip()
                     chain_id = line[21].strip()
                     if not chain_id:
                         chain_id = "A"
-                        
                     try:
                         res_seq = int(line[22:26].strip())
                     except ValueError:
                         res_seq = 1
-                        
-                    # Parse numerical coordinate blocks using strict spatial slicing
                     try:
                         x = float(line[30:38].strip())
                         y = float(line[38:46].strip())
@@ -81,23 +102,15 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=Fals
                     except ValueError:
                         continue
                         
-                    # Determine elemental symbols safely
                     element = line[76:78].strip()
                     if not element:
                         element = ''.join([c for c in atom_name if c.isalpha()])[0]
                     element = ''.join([c for c in element if c.isalpha()]).upper()
                     
-                    # Normalize case sensitivity rules
-                    if element in autodock_type_map:
-                        vina_type = autodock_type_map[element]
-                    else:
-                        vina_type = element.title()
-
-                    # Detect aromatic carbons
+                    vina_type = autodock_type_map.get(element, element.title())
                     if element == "C" and "AR" in atom_name.upper():
                         vina_type = "A"
 
-                    # Build perfectly formatted line entry
                     pdbqt_line = (
                         f"{record_type:<6}{atom_id:>5} {atom_name:<4} {res_name:>3} "
                         f"{chain_id}{res_seq:>4}    "
@@ -106,16 +119,11 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=Fals
                     )
                     pdbqt.write(pdbqt_line)
                     
-                elif line.startswith("TER") and not is_ligand:
-                    pdbqt.write("TER\n")
-            
-            # Close ligand structural blocks correctly
             if is_ligand:
                 pdbqt.write("ENDROOT\n")
-                pdbqt.write("TORSDOF 0\n")  # Sets default active rotatable bonds count
+                pdbqt.write(f"TORSDOF {torsions}\n")
             else:
                 pdbqt.write("ENDMDL\n")
-                
         return True, output_pdbqt
     except Exception as e:
         return False, str(e)
@@ -137,22 +145,18 @@ def convert_smiles_to_pdbqt(smiles_string, output_filename="ligand.pdbqt"):
         
         temp_pdb = "temp_ligand.pdb"
         Chem.MolToPDBFile(mol, temp_pdb)
-        
-        # Call converter with is_ligand=True to activate ROOT/ENDROOT wrapping
         convert_pdb_to_pdbqt(temp_pdb, output_filename, is_ligand=True)
         
         if os.path.exists(temp_pdb):
             os.remove(temp_pdb)
-            
         return True, output_filename
     except Exception as e:
         return False, str(e)
 
 
-# --- ISOLATED IFRAME PY3DMOL VIEWPORT RENDERING ---
+# --- PY3DMOL ENGINE VIEWPORT INTERFACE ---
 
 def render_molecule_html(pdb_string, style_type="stick", scheme="cyanCarbon"):
-    """Generates an interactive, containerized 3D rendering iframe viewport."""
     html_content = f"""
     <script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.0.4/3Dmol-min.js"></script>
     <div id="container" style="height: 380px; width: 100%; position: relative;"></div>
@@ -171,32 +175,30 @@ def render_molecule_html(pdb_string, style_type="stick", scheme="cyanCarbon"):
 
 st.set_page_config(page_title="In Silico Docking Hub", layout="wide")
 st.title("🔬 Automated Molecular Docking Studio")
-st.write("Streamline protein preparation via direct PDB lookup or standard file uploads, then map binding affinities instantly.")
+
+# Setup persistent background session variables to track centers across changes
+if "center_x" not in st.session_state: st.session_state.center_x = 0.0
+if "center_y" not in st.session_state: st.session_state.center_y = 0.0
+if "center_z" not in st.session_state: st.session_state.center_z = 0.0
 
 col_params, col_visual = st.columns([1, 1])
-
 target_ready = False
 prepared_receptor_path = "protein.pdbqt"
 
 with col_params:
     st.header("1. Target Protein Setup")
-    
     protein_source = st.radio("Choose Protein Input Method:", ["Type 4-Letter PDB ID", "Upload File (.pdb or .pdbqt)"])
     
     if protein_source == "Type 4-Letter PDB ID":
-        pdb_id_input = st.text_input("Enter RCSB PDB ID (e.g., 1IEP, 6LU7)", value="1IEP").strip()
+        pdb_id_input = st.text_input("Enter RCSB PDB ID", value="1IEP").strip()
         if pdb_id_input:
             fetch_success, pdb_file_path = fetch_pdb_from_rcsb(pdb_id_input)
             if fetch_success:
-                st.success(f"Successfully downloaded structural file: {pdb_file_path}")
+                cx, cy, cz = calculate_protein_center(pdb_file_path)
+                st.session_state.center_x, st.session_state.center_y, st.session_state.center_z = cx, cy, cz
+                st.success(f"Protein structural center mapped automatically to coordinates: X={cx:.1f}, Y={cy:.1f}, Z={cz:.1f}")
                 conv_success, err_msg = convert_pdb_to_pdbqt(pdb_file_path, prepared_receptor_path, is_ligand=False)
-                if conv_success:
-                    st.info("Structure auto-formatted into valid docking coordinates.")
-                    target_ready = True
-                else:
-                    st.error(f"Format Conversion Error: {err_msg}")
-            else:
-                st.error(pdb_file_path)
+                target_ready = conv_success
                 
     else:
         uploaded_file = st.file_uploader("Upload Target Protein File", type=["pdb", "pdbqt"])
@@ -204,59 +206,47 @@ with col_params:
             temp_upload_path = f"uploaded_{uploaded_file.name}"
             with open(temp_upload_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
-                
             if uploaded_file.name.endswith(".pdb"):
+                cx, cy, cz = calculate_protein_center(temp_upload_path)
+                st.session_state.center_x, st.session_state.center_y, st.session_state.center_z = cx, cy, cz
                 conv_success, err_msg = convert_pdb_to_pdbqt(temp_upload_path, prepared_receptor_path, is_ligand=False)
-                if conv_success:
-                    st.success("Uploaded standard PDB compiled down to operational format.")
-                    target_ready = True
-                else:
-                    st.error(f"Format Conversion Error: {err_msg}")
+                target_ready = conv_success
             else:
                 os.replace(temp_upload_path, prepared_receptor_path)
-                st.success("Valid coordinate format loaded directly.")
                 target_ready = True
 
     st.header("2. Small Molecule Ligand Setup")
     smiles_input = st.text_input("Enter Ligand SMILES String", "CC(=O)NC1=CC=C(O)C=C1")
     
     st.header("3. Grid Box Coordinates")
-    grid_cx = st.number_input("Center X Coordinate", value=15.0, step=0.1)
-    grid_cy = st.number_input("Center Y Coordinate", value=50.0, step=0.1)
-    grid_cz = st.number_input("Center Z Coordinate", value=15.0, step=0.1)
+    grid_cx = st.number_input("Center X Coordinate", value=st.session_state.center_x)
+    grid_cy = st.number_input("Center Y Coordinate", value=st.session_state.center_y)
+    grid_cz = st.number_input("Center Z Coordinate", value=st.session_state.center_z)
     
-    grid_sx = st.slider("Grid Box Size X (Å)", 10, 40, 20)
-    grid_sy = st.slider("Grid Box Size Y (Å)", 10, 40, 20)
-    grid_sz = st.slider("Grid Box Size Z (Å)", 10, 40, 20)
+    grid_sx = st.slider("Grid Box Size X (Å)", 15, 40, 22)
+    grid_sy = st.slider("Grid Box Size Y (Å)", 15, 40, 22)
+    grid_sz = st.slider("Grid Box Size Z (Å)", 15, 40, 22)
     
     exhaustiveness = st.slider("Search Exhaustiveness", min_value=4, max_value=32, value=8, step=4)
     run_btn = st.button("🚀 Initialize Docking Algorithm", type="primary", disabled=not target_ready)
 
 with col_visual:
     st.header("4. Active Viewport Canvas")
-    
     view_mode = st.radio("Select Viewport Target Matrix:", ["View Ligand Geometry", "View Target Protein Structure"])
     
     if view_mode == "View Ligand Geometry" and smiles_input:
-        st.subheader("Optimized Ligand 3D Topology")
         success, res = convert_smiles_to_pdbqt(smiles_input)
         if success:
-            with open(res, "r") as f:
-                ligand_data = f.read()
+            with open(res, "r") as f: ligand_data = f.read()
             render_molecule_html(ligand_data, style_type="stick", scheme="cyanCarbon")
-        else:
-            st.error(f"Structure Building Failed: {res}")
             
     elif view_mode == "View Target Protein Structure" and target_ready:
-        st.subheader("Prepared Target Biopolymer Mesh")
         if os.path.exists(prepared_receptor_path):
-            with open(prepared_receptor_path, "r") as f:
-                protein_data = f.read()
+            with open(prepared_receptor_path, "r") as f: protein_data = f.read()
             render_molecule_html(protein_data, style_type="cartoon", scheme="spectrum")
 
-    # --- ACTION EXECUTION BOUNDARY ---
     if run_btn and target_ready:
-        with st.spinner("Processing cloud-based structural search calculations..."):
+        with st.spinner("Processing structural search calculations using flexible ligand geometries..."):
             vina_command = [
                 "./vina",
                 "--receptor", prepared_receptor_path,
@@ -266,22 +256,12 @@ with col_visual:
                 "--exhaustiveness", str(exhaustiveness),
                 "--out", "docking_poses.pdbqt"
             ]
-            
             try:
                 process = subprocess.run(vina_command, capture_output=True, text=True, check=True)
                 st.success("Docking processing calculations completed successfully!")
-                
                 if process.stdout:
                     st.subheader("📊 Vina Scoring Report")
-                    st.text_area(
-                        label="Binding Affinities & Structural Poses Generated", 
-                        value=process.stdout, 
-                        height=300
-                    )
-                    
-                    with open("docking_log.txt", "w") as log_file:
-                        log_file.write(process.stdout)
-                        
+                    st.text_area(label="Results Log", value=process.stdout, height=300)
             except subprocess.CalledProcessError as err:
                 st.error("Calculations exited with error flags.")
                 st.code(err.stderr if err.stderr else err.stdout)
