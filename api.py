@@ -427,19 +427,30 @@ with col_params:
                             st.rerun()
                 except Exception as e: st.error(f"SMILES Parsing Failure: {e}")
             
-        elif ligand_source == "Upload Structural File (.pdb, .sdf)" and uploaded_lig_buffer is not None:
+       elif ligand_source == "Upload Structural File (.pdb, .sdf)" and uploaded_lig_buffer is not None:
             temp_in = f"raw_ligand_{uploaded_lig_name}"
             with open(temp_in, "wb") as f: f.write(uploaded_lig_buffer.getbuffer())
+            
+            # Load molecule
             mol = Chem.MolFromPDBFile(temp_in, removeHs=False) if uploaded_lig_name.endswith(".pdb") else Chem.SDMolSupplier(temp_in, removeHs=False)[0]
+            
             if mol:
+                # 1. GENERATE SMILES FOR PUBCHEM LOOKUP
+                # We do this before modifying the molecule (adding Hydrogens)
+                smiles_from_file = Chem.MolToSmiles(mol)
+                pub_data = fetch_ligand_data_from_pubchem(smiles_from_file)
+                
+                # 2. Proceed with your standard processing logic
                 try:
                     Chem.SanitizeMol(mol)
                     AllChem.AssignBondOrdersFromTopology(mol)
                 except Exception: pass
+                
                 if mol.GetNumConformers() == 0:
                     mol = Chem.AddHs(mol)
                     AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
                     AllChem.MMFFOptimizeMolecule(mol)
+                
                 temp_pdb = "temp_lig_state.pdb"
                 Chem.MolToPDBFile(mol, temp_pdb)
                 convert_pdb_to_pdbqt(temp_pdb, "ligand.pdbqt", is_ligand=True)
@@ -447,10 +458,17 @@ with col_params:
                 st.session_state.ligand_ready = True
                 st.session_state.smiles_cache = temp_in
                 with open("ligand.pdbqt", "r") as f: st.session_state.serialized_ligand_block = f.read()
-                st.session_state.ligand_summary_text = f"Formula: {Chem.CalcMolFormula(mol)} | MW: {round(Chem.Descriptors.MolWt(mol), 2)} g/mol | Rotatable Bonds: {AllChem.CalcNumRotatableBonds(mol)}"
+                
+                # 3. Update summary with PubChem data + RDKit calculations
+                st.session_state.ligand_summary_text = (
+                    f"**Name:** {pub_data['name']} | **Formula:** {Chem.CalcMolFormula(mol)} | "
+                    f"**MW:** {round(Chem.Descriptors.MolWt(mol), 2)} g/mol | "
+                    f"**Rotatable Bonds:** {AllChem.CalcNumRotatableBonds(mol)}"
+                )
+                
                 if os.path.exists(temp_in): os.remove(temp_in)
                 if os.path.exists(temp_pdb): os.remove(temp_pdb)
-                st.success("Structural file loaded!")
+                st.success("Structural file and metadata loaded!")
                 st.rerun()
 
     if st.session_state.target_ready and os.path.exists("ligand.pdbqt"):
