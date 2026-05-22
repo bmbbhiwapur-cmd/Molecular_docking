@@ -10,7 +10,8 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 from rdkit.Chem import Draw
 import streamlit.components.v1 as components
-import base64
+import base64from rdkit import Chem
+from rdkit.Chem import AllChem, Draw, Descriptors  # Added Descriptors here
 
 # --- CLOUD CONTEXT ENGINE MANAGEMENT ---
 
@@ -463,7 +464,7 @@ with col_params:
                 st.session_state.ligand_summary_text = (
                     f"**Name:** {pub_data['name']} | **Formula:** {Chem.CalcMolFormula(mol)} | "
                     f"**MW:** {round(Chem.Descriptors.MolWt(mol), 2)} g/mol | "
-                    f"**Rotatable Bonds:** {AllChem.CalcNumRotatableBonds(mol)}"
+                    f"**MW:** {round(Descriptors.MolWt(mol), 2)} g/mol" # Removed 'Chem.' prefix
                 )
                 
                 if os.path.exists(temp_in): os.remove(temp_in)
