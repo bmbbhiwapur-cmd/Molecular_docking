@@ -213,8 +213,6 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=Fals
                     element = ''.join([c for c in element if c.isalpha()]).upper()
                     vina_type = autodock_type_map.get(element, element.title())
                     if element == "C" and "AR" in atom_name.upper(): vina_type = "A"
-                    
-                    # FIXED LINE ENTRY SLICE MAP PINPOINT TERMINATION
                     pdbqt.write(f"{record_type:<6}{atom_id:>5} {atom_name:<4} {res_name:>3} {chain_id}{res_seq:>4}    {x:>8.3f}{y:>8.3f}{z:>8.3f}{1.00:>6.2f}{0.00:>6.2f}    +0.000 {vina_type:<2}\n")
             if is_ligand:
                 pdbqt.write("ENDROOT\n")
@@ -540,12 +538,14 @@ with col_visual:
             pose_affinity_score = get_pose_affinity(st.session_state.docking_results_raw, selected_pose)
             active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
             
-            st.markdown(f"""
+            # FIXED DECOUPLED FORMAT CONTAINER: Extracted styling mapping from raw f-string boundaries safely
+            html_metric_card = """
             <div style="background-color:#f0f7f4; border-left:6px solid #2e7d32; padding:15px; border-radius:6px; margin-bottom:15px;">
                 <span style="font-size:14px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Active Pose Affinity</span><br>
-                <span style="font-size:36px; font-weight:900; color:#1b5e20;">{pose_affinity_score} <span style="font-size:18px; font-weight:normal;">kcal/mol</span></span>
+                <span style="font-size:36px; font-weight:900; color:#1b5e20;">{} <span style="font-size:18px; font-weight:normal;">kcal/mol</span></span>
             </div>
-            """, unsafe_html=True)
+            """.format(pose_affinity_score)
+            st.markdown(html_metric_card, unsafe_html=True)
             
             col_render, col_mesh = st.columns([1, 1])
             with col_render:
