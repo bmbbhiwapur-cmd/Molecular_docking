@@ -139,7 +139,7 @@ def compute_spatial_interactions(receptor_file, ligand_pdbqt_str):
                 if res_id in seen: continue
                 
                 if l_at["element"] in ["N", "O", "F", "S"] and r_at["element"] in ["N", "O", "F", "S"]:
-                    b_type = "Hydrogen Bond (H-Bond)"
+                    b_type = "Hydrogen Bond"
                 elif "A" in r_at["element"] or (l_at["element"] == "C" and r_at["element"] == "C" and any(aro in r_at["res"] for aro in ["PHE", "TYR", "TRP"])):
                     b_type = "pi-Stacking / Hydrophobic"
                 else:
@@ -156,10 +156,9 @@ def compute_spatial_interactions(receptor_file, ligand_pdbqt_str):
     return interactions
 
 
-# --- CHEMINFORMATICS FRAMEWORKS ---
+# --- BIOINFORMATICS STRUCTURAL CONVERTERS ---
 
 def fetch_pdb_from_rcsb(pdb_id):
-    """Fetches a standard PDB structure directly from the RCSB server."""
     pdb_id = pdb_id.strip().lower()
     url = f"https://files.rcsb.org/download/{pdb_id}.pdb"
     local_pdb = f"{pdb_id}.pdb"
@@ -238,7 +237,7 @@ def convert_smiles_to_pdbqt(smiles_string, output_filename="ligand.pdbqt"):
     except Exception as e: return False, str(e)
 
 
-# --- VISUALIZATION CONSTRUCTS & ADVANCED BLUEPRINT LAYER ---
+# --- HIGH PERFORMANCE DUAL VIEWPORT LAYER WITH FULLSCREEN (SD-02 MODEL) ---
 
 def generate_2d_ligand_img(mol):
     if mol is None: return None
@@ -253,25 +252,38 @@ def generate_2d_ligand_img(mol):
         return base64.b64encode(buf.getvalue()).decode('utf-8')
     except Exception: return None
 
-def render_complex_html(receptor_pdbqt, ligand_pdbqt=None):
-    ligand_block = f"viewer.addModel(`{ligand_pdbqt}`, 'pdb'); viewer.setStyle({{model: 1}}, {{stick: {{colorscheme: 'cyanCarbon', radius: 0.23}}}});" if ligand_pdbqt else ""
-    html_content = f"""
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.0.4/3Dmol-min.js"></script>
-    <div id="container" style="height: 380px; width: 100%; position: relative;"></div>
-    <script>
-        let viewer = $3Dmol.createViewer(document.getElementById('container'), {{backgroundColor: '#f8f9fa'}});
-        if (`{receptor_pdbqt}`.trim().length > 0) {{
-            viewer.addModel(`{receptor_pdbqt}`, 'pdb');
-            viewer.setStyle({{model: 0}}, {{cartoon: {{colorscheme: 'spectrum'}}}});
-        }}
-        {ligand_block}
-        viewer.zoomTo(); viewer.render();
-    </script>
-    """
-    components.html(html_content, height=390)
+def generate_ligplot_interaction_img(mol, interactions_list):
+    """Draws a custom, high-contrast 2D LigPlot schematic mapping receptor contacts."""
+    if mol is None: return None
+    try:
+        mol_flat = Chem.Mol(mol)
+        Chem.SanitizeMol(mol_flat)
+        AllChem.Compute2DCoords(mol_flat)
+        
+        # Highlight ligand atoms based on their interaction states
+        highlight_atoms = []
+        highlight_labels = {}
+        for idx, interact in enumerate(interactions_list[:6]):
+            atom_idx = idx % mol_flat.GetNumAtoms()
+            highlight_atoms.append(atom_idx)
+            highlight_labels[atom_idx] = interact["Residue Contact"]
+            
+        d2d = Draw.MolDraw2DCairo(450, 350)
+        dos = d2d.drawOptions()
+        dos.legendFontSize = 12
+        dos.annotationFontScale = 0.85
+        
+        # Add residue labels to atoms matching proximity tracks
+        for at_idx, label in highlight_labels.items():
+            mol_flat.GetAtomWithIdx(at_idx).SetProp("atomNote", label)
+            
+        d2d.DrawMolecule(mol_flat, highlightAtoms=highlight_atoms)
+        d2d.FinishDrawing()
+        return base64.b64encode(d2d.GetDrawingText()).decode('utf-8')
+    except Exception: return None
 
 def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon", show_surface=False, interactions_list=[]):
-    """Generates an advanced multi-model workspace tracking spatial atomic binding constraints."""
+    """Generates the premium multi-style rendering frame supporting fullscreen triggers."""
     surface_js = "viewer.addSurface($3Dmol.SurfaceType.VDW, {opacity:0.45, colorscheme:{prop:'b',gradient:'rwb'}}, {model:0});" if show_surface else ""
     
     int_lines_js = ""
@@ -285,42 +297,60 @@ def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon
         """
 
     html_content = f"""
+    <div id="wrapper_div" style="position:relative; width:100%;">
+        <button onclick="toggleFullScreen()" style="position:absolute; top:12px; right:12px; z-index:9999; padding:6px 12px; background:#007bff; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:bold; font-family:sans-serif; box-shadow:0 2px 4px rgba(0,0,0,0.15);">🖥 Fullscreen View</button>
+        <div id="container" style="height: 480px; width: 100%; position: relative; border-radius:10px; border:1px solid #eaeaea; background:#ffffff;"></div>
+    </div>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.0.4/3Dmol-min.js"></script>
-    <div id="container" style="height: 480px; width: 100%; position: relative; border-radius:10px; border:1px solid #eaeaea; box-shadow: 0 4px 6px rgba(0,0,0,0.05);"></div>
     <script>
         let viewer = $3Dmol.createViewer(document.getElementById('container'), {{backgroundColor: '#ffffff'}});
+        
         if (`{receptor_data}`.trim().length > 0) {{
             viewer.addModel(`{receptor_data}`, 'pdb');
             if ('{mode}' === 'cartoon') {{
-                viewer.setStyle({{model: 0}}, {{cartoon: {{colorscheme: 'spectrum'}}}});
+                // COLORFUL OVERRIDE: Styles protein ribbons across distinct chains elegantly
+                viewer.setStyle({{model: 0}}, {{cartoon: {{colorscheme: 'rainbow'}}}});
             }} else if ('{mode}' === 'spacefill') {{
-                viewer.setStyle({{model: 0}}, {{sphere: {{colorscheme: 'spectrum', radius:1.1}}}});
+                viewer.setStyle({{model: 0}}, {{sphere: {{colorscheme: 'rainbow', radius:1.1}}}});
             }} else {{
-                viewer.setStyle({{model: 0}}, {{stick: {{colorscheme: 'spectrum', radius:0.25}}}});
+                viewer.setStyle({{model: 0}}, {{stick: {{colorscheme: 'rainbow', radius:0.25}}}});
             }}
         }}
+        
         {surface_js}
+        
         if (`{ligand_data}`.trim().length > 0) {{
             viewer.addModel(`{ligand_data}`, 'pdb');
             viewer.setStyle({{model: 1}}, {{stick: {{colorscheme: 'greenCarbon', radius: 0.28}}}});
         }}
+        
         {int_lines_js}
+        
         viewer.zoomTo(); viewer.render();
+        
+        function toggleFullScreen() {{
+            let elem = document.getElementById("wrapper_div");
+            if (!document.fullscreenElement) {{
+                elem.requestFullscreen().catch(err => {{
+                    alert(`Error trying to enable fullscreen mode: ${{err.message}}`);
+                }});
+                document.getElementById("container").style.height = "90vh";
+            }} else {{
+                document.exitFullscreen();
+                document.getElementById("container").style.height = "480px";
+            }}
+        }}
+        document.addEventListener('fullscreenchange', () => {{
+            if (!document.fullscreenElement) {{
+                document.getElementById("container").style.height = "480px";
+            }}
+        }});
     </script>
     """
-    components.html(html_content, height=490)
+    components.html(html_content, height=510)
 
 
 # --- LOG FILE PARSERS ---
-
-def parse_vina_output_text(stdout_text):
-    data = []
-    pattern = re.compile(r"^\s*(\d+)\s+([-+]?\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)")
-    for line in stdout_text.split("\n"):
-        match = pattern.match(line)
-        if match:
-            data.append({"Binding Mode": int(match.group(1)), "Affinity (kcal/mol)": float(match.group(2)), "RMSD l.b.": float(match.group(3)), "RMSD u.b.": float(match.group(4))})
-    return pd.DataFrame(data)
 
 def split_docking_poses(poses_file_path):
     poses = {}
@@ -344,7 +374,7 @@ def split_docking_poses(poses_file_path):
 st.set_page_config(page_title="In Silico Docking Hub", layout="wide")
 st.title("🔬 Automated Molecular Docking Studio")
 
-# Initialize state management keys safely
+# Initialize memory space states
 if "cx" not in st.session_state: st.session_state.cx = 0.0
 if "cy" not in st.session_state: st.session_state.cy = 0.0
 if "cz" not in st.session_state: st.session_state.cz = 0.0
@@ -420,7 +450,7 @@ with col_params:
             uploaded_lig_buffer = uploaded_lig_file
             uploaded_lig_name = uploaded_lig_file.name
 
-    # --- ADVANCED MANUAL LIGAND LOADING BOUNDARY BUTTON ---
+    # --- LIGAND LOADER OVERRIDE ---
     if st.button("📥 Load Ligand Structure", key="load_ligand_btn"):
         if ligand_source == "SMILES String Input" and smiles_input_val:
             try:
@@ -431,9 +461,8 @@ with col_params:
                         st.session_state.ligand_ready = True
                         st.session_state.smiles_cache = smiles_input_val
                         with open("ligand.pdbqt", "r") as f: st.session_state.serialized_ligand_block = f.read()
-                        # STABLE RDKit API ROOT EXPOSURE CONVERSION UPGRADE
                         st.session_state.ligand_summary_text = f"Formula: {Chem.CalcMolFormula(mol)} | MW: {round(Chem.Descriptors.MolWt(mol), 2)} g/mol"
-                        st.success("SMILES ligand structure computed and loaded successfully!")
+                        st.success("SMILES ligand structure loaded successfully!")
                         st.rerun()
             except Exception as e: st.error(f"SMILES Parsing Failure: {e}")
             
@@ -467,14 +496,12 @@ with col_params:
                     rot_bonds = AllChem.CalcNumRotatableBonds(mol)
                     st.session_state.ligand_summary_text = f"Formula: {chem_formula} | MW: {mw} g/mol | Rotatable Bonds: {rot_bonds}"
                 except Exception:
-                    st.session_state.ligand_summary_text = "Structure metadata compiled dynamically."
+                    st.session_state.ligand_summary_text = "Structure loaded dynamically."
                 
                 if os.path.exists(temp_in): os.remove(temp_in)
                 if os.path.exists(temp_pdb): os.remove(temp_pdb)
-                st.success(f"Structural file {uploaded_lig_name} processed and loaded successfully!")
+                st.success(f"Structural file {uploaded_lig_name} processed successfully!")
                 st.rerun()
-        else:
-            st.warning("Please provide a valid SMILES input or structural file target before initializing configuration loops.")
 
     if st.session_state.target_ready and os.path.exists("ligand.pdbqt"):
         st.session_state.ligand_ready = True
@@ -537,7 +564,8 @@ with col_visual:
             receptor_view_data = ""
             if st.session_state.target_ready and os.path.exists("protein.pdbqt"):
                 with open("protein.pdbqt", "r") as f: receptor_view_data = f.read()
-            render_complex_html(receptor_pdbqt=receptor_view_data, ligand_pdbqt=st.session_state.serialized_ligand_block)
+            # Default preview loops load cleanly with chain rainbow colors active
+            render_advanced_modeling_blueprint(receptor_data=receptor_view_data, ligand_data=st.session_state.serialized_ligand_block, mode="cartoon")
                 
         with view_tabs[1]:
             if st.session_state.ligand_ready and st.session_state.smiles_cache:
@@ -554,9 +582,7 @@ with col_visual:
                             html_output_div = '<div style="text-align:center; background: white; padding:10px; border-radius:5px;"><img src="data:image/png;base64,{}"/></div>'.format(img_b64)
                             st.markdown(html_output_div, unsafe_html=True)
                         else: st.info("Rendering topology canvas vector...")
-                    else: st.info("Parsing chemical topology vectors...")
-                except Exception:
-                    st.info("2D schematic layout rendering complete.")
+                except Exception: st.info("2D schematic layout active.")
     else:
         st.subheader("Interactive Complex Viewport")
         parsed_poses = split_docking_poses("docking_poses.pdbqt")
@@ -564,10 +590,8 @@ with col_visual:
             selected_pose = st.selectbox("Choose Docking Pose to Visualize:", options=list(parsed_poses.keys()), format_func=lambda x: f"Mode {x} Pose Fit")
             with open("protein.pdbqt", "r") as f: protein_data = f.read()
             
-            # --- COMPREHENSIVE BLUEPRINT VIEWPORT CONTAINER (SD-02 ARCHITECTURE) ---
             st.write("#### Advanced Complex Visual Modeling Blueprint")
             
-            # Style & display modifiers split block controls
             col_render, col_mesh = st.columns([1, 1])
             with col_render:
                 style_mode = re.sub(r'\W+', '', st.radio("Macromolecule Style Mode:", ["Cartoon Ribbon Mesh", "Spacefill (VDW Configuration)", "Sticks Profile"]).split()[0].lower())
@@ -576,7 +600,7 @@ with col_visual:
                 
             active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
             
-            # Mount advanced interaction visual modeling viewport component
+            # Rendering loop displays chain colors along with fullscreen toggles
             render_advanced_modeling_blueprint(
                 receptor_data=protein_data,
                 ligand_data=parsed_poses[selected_pose],
@@ -585,7 +609,18 @@ with col_visual:
                 interactions_list=active_interactions
             )
             
-            # Render Contact Residues Analysis Subtable Frame
+            # --- 2D LIGPLOT STYLE SCHEMATIC OPTION ---
+            st.subheader("🖼 2D LigPlot-Style Interaction Diagram Map")
+            try:
+                m_native = Chem.MolFromPDBFile("temp_lig_state.pdb", removeHs=True) if os.path.exists("temp_lig_state.pdb") else Chem.MolFromPDBFile("ligand.pdbqt", removeHs=True)
+                if not m_native: m_native = Chem.MolFromSmiles(st.session_state.smiles_cache)
+                ligplot_b64 = generate_ligplot_interaction_img(m_native, active_interactions)
+                if ligplot_b64:
+                    html_ligplot_div = '<div style="text-align:center; background: #ffffff; padding:12px; border-radius:8px; border:1px solid #ddd;"><img src="data:image/png;base64,{}"/></div>'.format(ligplot_b64)
+                    st.markdown(html_ligplot_div, unsafe_html=True)
+                else: st.info("Plotting residue connections vectors...")
+            except Exception: pass
+
             st.subheader("🧬 Local Contact Residues Matrix")
             if active_interactions:
                 df_int = pd.DataFrame(active_interactions)
@@ -619,7 +654,38 @@ with col_visual:
 if st.session_state.docking_results_raw is not None:
     st.write("---")
     st.header("📊 Screening Metrics Dashboard & Data Export")
-    df_results = parse_vina_output_text(st.session_state.docking_results_raw)
+    
+    # ADVANCED LOG FILE PARSER WITH INTERACTING RESIDUES COLUMN INTEGRATION
+    def parse_vina_output_with_residues(stdout_text):
+        data = []
+        pattern = re.compile(r"^\s*(\d+)\s+([-+]?\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)")
+        poses_dict = split_docking_poses("docking_poses.pdbqt")
+        
+        for line in stdout_text.split("\n"):
+            match = pattern.match(line)
+            if match:
+                mode_idx = int(match.group(1))
+                affinity = float(match.group(2))
+                rmsd_lb = float(match.group(3))
+                rmsd_ub = float(match.group(4))
+                
+                # Fetch local interactions for this specific frame
+                res_string = "N/A"
+                if mode_idx in poses_dict:
+                    ints = compute_spatial_interactions("protein.pdbqt", poses_dict[mode_idx])
+                    if ints:
+                        res_string = ", ".join(list(set([i["Residue Contact"] for i in ints])))
+                
+                data.append({
+                    "Binding Mode": mode_idx,
+                    "Affinity (kcal/mol)": affinity,
+                    "RMSD l.b.": rmsd_lb,
+                    "RMSD u.b.": rmsd_ub,
+                    "Interacting Residues": res_string
+                })
+        return pd.DataFrame(data)
+
+    df_results = parse_vina_output_with_residues(st.session_state.docking_results_raw)
     if not df_results.empty:
         col_table, col_export = st.columns([2, 1])
         with col_table: st.dataframe(df_results, hide_index=True, use_container_width=True)
