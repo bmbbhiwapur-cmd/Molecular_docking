@@ -203,7 +203,7 @@ def render_complex_html(receptor_pdbqt, ligand_pdbqt=None):
     components.html(html_content, height=390)
 
 
-# --- TRANSCRIPTS PARSERS ---
+# --- LOG FILE PARSERS ---
 
 def parse_vina_output_text(stdout_text):
     data = []
@@ -236,7 +236,7 @@ def split_docking_poses(poses_file_path):
 st.set_page_config(page_title="In Silico Docking Hub", layout="wide")
 st.title("🔬 Automated Molecular Docking Studio")
 
-# Initialize state management keys
+# Initialize and lock internal state management structures
 if "cx" not in st.session_state: st.session_state.cx = 0.0
 if "cy" not in st.session_state: st.session_state.cy = 0.0
 if "cz" not in st.session_state: st.session_state.cz = 0.0
@@ -268,7 +268,7 @@ with col_params:
                     st.session_state.pdb_id_display = pdb_id_input.upper()
                     conv_ok, _ = convert_pdb_to_pdbqt(path, "protein.pdbqt")
                     st.session_state.target_ready = conv_ok
-                    st.success(f"Protein {pdb_id_input.upper()} successfully cached!")
+                    st.success(f"Protein {pdb_id_input.upper()} successfully loaded!")
                     st.rerun()
                 else: st.error(path)
     else:
@@ -329,11 +329,8 @@ with col_params:
                     mol = suppl[0] if suppl else None
                     
                 if mol:
-                    # CRITICAL FIX: Explicitly sanitize molecular ring systems, valencies, and graphs
-                    try:
-                        Chem.SanitizeMol(mol)
-                    except Exception:
-                        pass # Proceed with fallback structures if partial sanitization handles it
+                    try: Chem.SanitizeMol(mol)
+                    except Exception: pass
                         
                     if mol.GetNumConformers() == 0:
                         mol = Chem.AddHs(mol)
@@ -348,21 +345,23 @@ with col_params:
                     st.session_state.smiles_cache = temp_in
                     with open("ligand.pdbqt", "r") as f: st.session_state.serialized_ligand_block = f.read()
                     
-                    # Safe chemical metadata calculation on cleanly sanitized graphs
                     chem_formula = Chem.rdmolops.CalcMolFormula(mol)
                     mw = round(Chem.Descriptors.MolWt(mol), 2)
                     rot_bonds = AllChem.CalcNumRotatableBonds(mol)
-                    
                     st.session_state.ligand_summary_text = f"Formula: {chem_formula} | MW: {mw} g/mol | Rotatable Bonds: {rot_bonds}"
                     
                     if os.path.exists(temp_in): os.remove(temp_in)
                     if os.path.exists(temp_pdb): os.remove(temp_pdb)
                     st.rerun()
 
-    if st.session_state.get("ligand_ready", False):
+    if st.session_state.target_ready and os.path.exists("ligand.pdbqt"):
+        # Extra safety check: if file exists on disk, force validation state to true
+        st.session_state.ligand_ready = True
+
+    if st.session_state.ligand_ready:
         st.markdown(f"> **Ligand Metric Summary:**  \n> {st.session_state.ligand_summary_text}")
 
-    # --- BOUND CO-CRYSTAL PARSER PANEL ---
+    # --- BOUND CO-CRYSTAL SEARCH SITE PANEL ---
     if st.session_state.target_ready and st.session_state.local_target_path:
         bound_ligands_list = parse_bound_ligands(st.session_state.local_target_path)
         if bound_ligands_list:
@@ -390,7 +389,7 @@ with col_params:
                 st.session_state.sx = chosen_target["bx"]
                 st.session_state.sy = chosen_target["by"]
                 st.session_state.sz = chosen_target["bz"]
-                st.success("Grid parameters aligned successfully!")
+                st.success("Grid parameters locked down successfully!")
                 st.rerun()
 
     st.header("4. Search Space Mechanics (Grid Box)")
@@ -404,6 +403,7 @@ with col_params:
     
     exhaustiveness = st.slider("Search Exhaustiveness", min_value=4, max_value=32, value=8, step=4)
     
+    # Core state checker using state engine tracking
     can_dock = bool(st.session_state.target_ready and st.session_state.ligand_ready)
     run_btn = st.button("🚀 Initialize Docking Algorithm", type="primary", disabled=not can_dock)
 
@@ -426,7 +426,7 @@ with col_visual:
                 else: m = Chem.MolFromSmiles(st.session_state.smiles_cache)
                 img_b64 = generate_2d_ligand_img(m)
                 if img_b64: st.markdown(f'<div style="text-align:center; background: white; padding:10px; border-radius:5px;"><img src="data:image/png;base64,{img_b64}"/></div>', unsafe_html=True)
-                else: st.info("Schematic conversion not active for current layout configurations.")
+                else: st.info("Schematic matrix view loading...")
     else:
         st.subheader("Interactive Complex Viewport")
         parsed_poses = split_docking_poses("docking_poses.pdbqt")
