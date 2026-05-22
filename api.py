@@ -434,12 +434,23 @@ with col_params:
             mol = Chem.MolFromPDBFile(temp_in, removeHs=False) if uploaded_lig_name.endswith(".pdb") else Chem.SDMolSupplier(temp_in, removeHs=False)[0]
             
             if mol:
-                # 1. GENERATE SMILES FOR PUBCHEM LOOKUP
-                # We do this before modifying the molecule (adding Hydrogens)
-                smiles_from_file = Chem.MolToSmiles(mol)
-                pub_data = fetch_ligand_data_from_pubchem(smiles_from_file)
+                # 1. GENERATE SMILES AND FETCH DATA GRACEFULLY
+                try:
+                    smiles_from_file = Chem.MolToSmiles(mol)
+                    pub_data = fetch_ligand_data_from_pubchem(smiles_from_file)
+                    # Update summary only if fetch is successful
+                    st.session_state.ligand_summary_text = (
+                        f"**Name:** {pub_data['name']} | **Formula:** {pub_data['formula']} | "
+                        f"**MW:** {round(Descriptors.MolWt(mol), 2)} g/mol"
+                    )
+                except Exception:
+                    # If fetch fails, provide a fallback message instead of crashing
+                    st.session_state.ligand_summary_text = (
+                        f"**Name:** File Upload | **Formula:** {Chem.CalcMolFormula(mol)} | "
+                        f"**MW:** {round(Descriptors.MolWt(mol), 2)} g/mol (Metadata Unavailable)"
+                    )
                 
-                # 2. Proceed with your standard processing logic
+                # 2. Proceed with your standard processing logic (This remains outside the try-except)
                 try:
                     Chem.SanitizeMol(mol)
                     AllChem.AssignBondOrdersFromTopology(mol)
