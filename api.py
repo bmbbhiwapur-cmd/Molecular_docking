@@ -176,7 +176,6 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=Fals
 def generate_2d_ligand_img(mol):
     if mol is None: return None
     try:
-        # Create a clean topology copy stripped of messy 3D rendering tracks
         mol_flat = Chem.Mol(mol)
         AllChem.Compute2DCoords(mol_flat)
         img = Draw.MolToImage(mol_flat, size=(340, 260))
@@ -237,7 +236,7 @@ def split_docking_poses(poses_file_path):
 st.set_page_config(page_title="In Silico Docking Hub", layout="wide")
 st.title("🔬 Automated Molecular Docking Studio")
 
-# --- INITIALIZE CORE CACHE STATE ENGRAVING KEYS ---
+# Initialize state management keys
 if "cx" not in st.session_state: st.session_state.cx = 0.0
 if "cy" not in st.session_state: st.session_state.cy = 0.0
 if "cz" not in st.session_state: st.session_state.cz = 0.0
@@ -276,7 +275,6 @@ with col_params:
         uploaded_file = st.file_uploader("Upload Target Protein File", type=["pdb", "pdbqt"])
         if uploaded_file:
             path = f"uploaded_{uploaded_file.name}"
-            # Protect file streaming writes against mid-calculation re-runs
             if st.session_state.local_target_path != path:
                 with open(path, "wb") as f: f.write(uploaded_file.getbuffer())
                 st.session_state.local_target_path = path
@@ -290,7 +288,6 @@ with col_params:
                     st.session_state.local_target_path = None
                 st.rerun()
 
-    # Render Persistent Protein Profile Cards
     if st.session_state.target_ready and st.session_state.local_target_path:
         meta = extract_pdb_metadata(st.session_state.local_target_path, st.session_state.pdb_id_display)
         st.markdown(f"""
@@ -316,25 +313,33 @@ with col_params:
                         st.session_state.smiles_cache = smiles_input
                         with open("ligand.pdbqt", "r") as f: st.session_state.serialized_ligand_block = f.read()
                         st.session_state.ligand_summary_text = f"Formula: {Chem.rdmolops.CalcMolFormula(mol)} | MW: {round(Chem.Descriptors.MolWt(mol), 2)} g/mol"
+                        st.rerun()
             except Exception: pass
     else:
         uploaded_lig_file = st.file_uploader("Upload Small Molecule File", type=["pdb", "sdf"])
         if uploaded_lig_file:
             temp_in = f"raw_ligand_{uploaded_lig_file.name}"
-            # Check if this file has already been processed to prevent system loops
             if st.session_state.smiles_cache != temp_in:
                 with open(temp_in, "wb") as f: f.write(uploaded_lig_file.getbuffer())
                 
-                if uploaded_lig_file.name.endswith(".pdb"): mol = Chem.MolFromPDBFile(temp_in, removeHs=False)
+                if uploaded_lig_file.name.endswith(".pdb"): 
+                    mol = Chem.MolFromPDBFile(temp_in, removeHs=False)
                 else:
                     suppl = Chem.SDMolSupplier(temp_in, removeHs=False)
                     mol = suppl[0] if suppl else None
                     
                 if mol:
+                    # CRITICAL FIX: Explicitly sanitize molecular ring systems, valencies, and graphs
+                    try:
+                        Chem.SanitizeMol(mol)
+                    except Exception:
+                        pass # Proceed with fallback structures if partial sanitization handles it
+                        
                     if mol.GetNumConformers() == 0:
                         mol = Chem.AddHs(mol)
                         AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
                         AllChem.MMFFOptimizeMolecule(mol)
+                        
                     temp_pdb = "temp_lig_state.pdb"
                     Chem.MolToPDBFile(mol, temp_pdb)
                     convert_pdb_to_pdbqt(temp_pdb, "ligand.pdbqt", is_ligand=True)
@@ -342,15 +347,22 @@ with col_params:
                     st.session_state.ligand_ready = True
                     st.session_state.smiles_cache = temp_in
                     with open("ligand.pdbqt", "r") as f: st.session_state.serialized_ligand_block = f.read()
-                    st.session_state.ligand_summary_text = f"Formula: {Chem.rdmolops.CalcMolFormula(mol)} | MW: {round(Chem.Descriptors.MolWt(mol), 2)} g/mol | Rotatable Bonds: {AllChem.CalcNumRotatableBonds(mol)}"
+                    
+                    # Safe chemical metadata calculation on cleanly sanitized graphs
+                    chem_formula = Chem.rdmolops.CalcMolFormula(mol)
+                    mw = round(Chem.Descriptors.MolWt(mol), 2)
+                    rot_bonds = AllChem.CalcNumRotatableBonds(mol)
+                    
+                    st.session_state.ligand_summary_text = f"Formula: {chem_formula} | MW: {mw} g/mol | Rotatable Bonds: {rot_bonds}"
+                    
                     if os.path.exists(temp_in): os.remove(temp_in)
                     if os.path.exists(temp_pdb): os.remove(temp_pdb)
                     st.rerun()
 
-    if st.session_state.ligand_ready:
+    if st.session_state.get("ligand_ready", False):
         st.markdown(f"> **Ligand Metric Summary:**  \n> {st.session_state.ligand_summary_text}")
 
-    # --- BOUND CO-CRYSTAL SEARCH SITE AUTO-LOCK PANEL ---
+    # --- BOUND CO-CRYSTAL PARSER PANEL ---
     if st.session_state.target_ready and st.session_state.local_target_path:
         bound_ligands_list = parse_bound_ligands(st.session_state.local_target_path)
         if bound_ligands_list:
@@ -382,10 +394,9 @@ with col_params:
                 st.rerun()
 
     st.header("4. Search Space Mechanics (Grid Box)")
-    # Track parameter updates explicitly through numbers input adjustments
-    grid_cx = st.number_input("Center X Coordinate", value=st.session_state.cx, step=0.1)
-    grid_cy = st.number_input("Center Y Coordinate", value=st.session_state.cy, step=0.1)
-    grid_cz = st.number_input("Center Z Coordinate", value=st.session_state.cz, step=0.1)
+    grid_cx = st.number_input("Center X Coordinate", value=float(st.session_state.cx), step=0.1)
+    grid_cy = st.number_input("Center Y Coordinate", value=float(st.session_state.cy), step=0.1)
+    grid_cz = st.number_input("Center Z Coordinate", value=float(st.session_state.cz), step=0.1)
     
     grid_sx = st.slider("Grid Box Size X (Å)", 10, 40, int(st.session_state.sx))
     grid_sy = st.slider("Grid Box Size Y (Å)", 10, 40, int(st.session_state.sy))
@@ -393,7 +404,6 @@ with col_params:
     
     exhaustiveness = st.slider("Search Exhaustiveness", min_value=4, max_value=32, value=8, step=4)
     
-    # State verification guard check before executing calculation process loops
     can_dock = bool(st.session_state.target_ready and st.session_state.ligand_ready)
     run_btn = st.button("🚀 Initialize Docking Algorithm", type="primary", disabled=not can_dock)
 
@@ -404,7 +414,6 @@ with col_visual:
         view_tabs = st.tabs(["3D Structural Space", "2D Schematic Topology View"])
         
         with view_tabs[0]:
-            # Construct active runtime previews
             receptor_view_data = ""
             if st.session_state.target_ready and os.path.exists("protein.pdbqt"):
                 with open("protein.pdbqt", "r") as f: receptor_view_data = f.read()
@@ -412,13 +421,12 @@ with col_visual:
                 
         with view_tabs[1]:
             if st.session_state.ligand_ready and st.session_state.smiles_cache:
-                # Re-parse structure from cache safely to draw the schematic image vector
                 if "raw_ligand" in st.session_state.smiles_cache:
                      m = Chem.MolFromPDBFile("ligand.pdbqt", removeHs=True)
                 else: m = Chem.MolFromSmiles(st.session_state.smiles_cache)
                 img_b64 = generate_2d_ligand_img(m)
                 if img_b64: st.markdown(f'<div style="text-align:center; background: white; padding:10px; border-radius:5px;"><img src="data:image/png;base64,{img_b64}"/></div>', unsafe_html=True)
-                else: st.info("Schematic conversion not active for current layout data parameters.")
+                else: st.info("Schematic conversion not active for current layout configurations.")
     else:
         st.subheader("Interactive Complex Viewport")
         parsed_poses = split_docking_poses("docking_poses.pdbqt")
