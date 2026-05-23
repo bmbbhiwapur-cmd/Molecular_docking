@@ -18,21 +18,12 @@ def ensure_linux_vina_exists():
     if not os.path.exists(binary_name):
         with st.spinner("Initializing Cloud Computational Server Environment (Downloading Vina)..."):
             try:
-                # Using the robust 1.2.5 Linux binary release
                 url = "https://github.com/ccsb-scripps/AutoDock-Vina/releases/download/v1.2.5/vina_1.2.5_linux_x86_64"
                 urllib.request.urlretrieve(url, binary_name)
-                
-                # Force Linux execution permissions (rwxr-xr-x)
                 os.chmod(binary_name, 0o755)
                 st.success("Cloud backend binaries mounted successfully!")
             except Exception as e:
                 st.error(f"Failed to bootstrap Linux engine environment: {e}")
-    else:
-        # Double-check permissions even if file exists to prevent silent blocks
-        try:
-            os.chmod(binary_name, 0o755)
-        except Exception:
-            pass
 
 ensure_linux_vina_exists()
 
@@ -435,35 +426,258 @@ with col_params:
                             st.rerun()
                 except Exception as e: st.error(f"SMILES Parsing Failure: {e}")
             
-        elif ligand_source == "Upload Structural File (.pdb, .sdf)" and uploaded_lig_buffer is not None:
-            temp_in = f"raw_ligand_{uploaded_lig_name}"
-            with open(temp_in, "wb") as f:
-                f.write(uploaded_lig_buffer.getbuffer())
+    elif ligand_source == "Upload Structural File (.pdb, .sdf)" and uploaded_lig_buffer is not None:
+        temp_in = f"raw_ligand_{uploaded_lig_name}"
+        with open(temp_in, "wb") as f:
+            f.write(uploaded_lig_buffer.getbuffer())
+        
+        mol = Chem.MolFromPDBFile(temp_in, removeHs=False) if uploaded_lig_name.endswith(".pdb") else Chem.SDMolSupplier(temp_in, removeHs=False)[0]
+        
+        if mol:
+            try:
+                Chem.SanitizeMol(mol)
+                AllChem.AssignBondOrdersFromTopology(mol)
+            except Exception:
+                pass
             
-            mol = Chem.MolFromPDBFile(temp_in, removeHs=False) if uploaded_lig_name.endswith(".pdb") else Chem.SDMolSupplier(temp_in, removeHs=False)[0]
+            if mol.GetNumConformers() == 0:
+                mol = Chem.AddHs(mol)
+                AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
+                AllChem.MMFFOptimizeMolecule(mol)
             
-            if mol:
+            temp_pdb = "temp_lig_state.pdb"
+            Chem.MolToPDBFile(mol, temp_pdb)
+            convert_pdb_to_pdbqt(temp_pdb, "ligand.pdbqt", is_ligand=True)
+            
+            st.session_state.ligand_ready = True
+            st.session_state.smiles_cache = temp_in
+            with open("ligand.pdbqt", "r") as f:
+                st.session_state.serialized_ligand_block = f.read()
+            
+            if os.path.exists(temp_in):
+                os.remove(temp_in)
+            if os.path.exists(temp_pdb):
+                os.remove(temp_pdb)
+            st.success("Structural file loaded and ready for docking!")
+                
+                if os.path.exists(temp_in): os.remove(temp_in)
+                if os.path.exists(temp_pdb): os.remove(temp_pdb)
+                st.success("Structural file and metadata loaded!")
+                st.rerun()
+
+    if st.session_state.target_ready and os.path.exists("ligand.pdbqt"):
+        st.session_state.ligand_ready = True
+
+    if st.session_state.ligand_ready:
+        st.markdown(f"> **Ligand Metric Summary Profile:** \n> {st.session_state.ligand_summary_text}")
+
+    # --- BOUND CO-CRYSTAL SEARCH SITE PANEL ---
+    if st.session_state.target_ready and st.session_state.local_target_path:
+        bound_ligands_list = parse_bound_ligands(st.session_state.local_target_path)
+        if bound_ligands_list:
+            st.header("3. Bound Small Molecules in Receptor")
+            df_bound = pd.DataFrame(bound_ligands_list)
+            df_display = df_bound.copy()
+            df_display["Center (X, Y, Z) Å"] = df_display.apply(lambda r: f"{r['cx']}, {r['cy']}, {r['cz']}", axis=1)
+            df_display["Box (X, Y, Z) Å"] = df_display.apply(lambda r: f"{r['bx']}, {r['by']}, {r['bz']}", axis=1)
+            st.dataframe(df_display[["ID", "Chain", "ResSeq", "Atoms", "Center (X, Y, Z) Å", "Box (X, Y, Z) Å"]], hide_index=True, use_container_width=True)
+            
+            selected_lig_id = st.selectbox("Select native co-crystal target to auto-fill grid box:", options=range(len(bound_ligands_list)), format_func=lambda idx: f"{bound_ligands_list[idx]['ID']} (Chain {bound_ligands_list[idx]['Chain']}-ResSeq {bound_ligands_list[idx]['ResSeq']})")
+            if st.button("🎯 Lock Coordinates to Native Site"):
+                chosen_target = bound_ligands_list[selected_lig_id]
+                st.session_state.cx, st.session_state.cy, st.session_state.cz = chosen_target["cx"], chosen_target["cy"], chosen_target["cz"]
+                st.session_state.sx, st.session_state.sy, st.session_state.sz = chosen_target["bx"], chosen_target["by"], chosen_target["bz"]
+                st.success("Grid parameters aligned over pocket boundaries!")
+                st.rerun()
+
+    st.header("4. Search Space Mechanics (Grid Box)")
+    grid_cx = st.number_input("Center X Coordinate", value=float(st.session_state.cx), step=0.1)
+    grid_cy = st.number_input("Center Y Coordinate", value=float(st.session_state.cy), step=0.1)
+    grid_cz = st.number_input("Center Z Coordinate", value=float(st.session_state.cz), step=0.1)
+    
+    grid_sx = st.slider("Grid Box Size X (Å)", 10, 40, int(st.session_state.sx))
+    grid_sy = st.slider("Grid Box Size Y (Å)", 10, 40, int(st.session_state.sy))
+    grid_sz = st.slider("Grid Box Size Z (Å)", 10, 40, int(st.session_state.sz))
+    exhaustiveness = st.slider("Search Exhaustiveness", min_value=4, max_value=32, value=8, step=4)
+    
+    can_dock = bool(st.session_state.target_ready and st.session_state.ligand_ready)
+    run_btn = st.button("🚀 Initialize Docking Algorithm", type="primary", disabled=not can_dock)
+
+with col_visual:
+    st.header("5. Active Viewport Canvas")
+    
+    if st.session_state.docking_results_raw is None:
+        view_tabs = st.tabs(["3D Structural Space", "2D Schematic Topology View"])
+        with view_tabs[0]:
+            receptor_view_data = ""
+            if st.session_state.target_ready and os.path.exists("protein.pdbqt"):
+                with open("protein.pdbqt", "r") as f: receptor_view_data = f.read()
+            render_advanced_modeling_blueprint(receptor_view_data, st.session_state.serialized_ligand_block, mode="cartoon")
+        with view_tabs[1]:
+            if st.session_state.ligand_ready and st.session_state.smiles_cache:
                 try:
-                    Chem.SanitizeMol(mol)
-                    AllChem.AssignBondOrdersFromTopology(mol)
-                except Exception:
-                    pass
+                    m_img = Chem.MolFromPDBFile(st.session_state.smiles_cache, removeHs=True) if "raw_ligand" in st.session_state.smiles_cache else Chem.MolFromSmiles(st.session_state.smiles_cache)
+                    if m_img:
+                        Chem.SanitizeMol(m_img)
+                        img_b64 = generate_2d_ligand_img(m_img)
+                        if img_b64: st.markdown('<div style="text-align:center; background: white; padding:10px; border-radius:5px;"><img src="data:image/png;base64,{}"/></div>'.format(img_b64), unsafe_html=True)
+                except Exception: pass
+    else:
+        st.subheader("Interactive Complex Viewport")
+        if os.path.exists("docking_poses.pdbqt"):
+            parsed_poses = split_docking_poses("docking_poses.pdbqt")
+            if parsed_poses:
+                selected_pose = st.selectbox("Choose Docking Pose to Visualize:", options=list(parsed_poses.keys()), format_func=lambda x: f"Mode {x} Pose Fit")
+                with open("protein.pdbqt", "r") as f: protein_data = f.read()
                 
-                if mol.GetNumConformers() == 0:
-                    mol = Chem.AddHs(mol)
-                    AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
-                    AllChem.MMFFOptimizeMolecule(mol)
+                def get_pose_affinity(stdout_text, idx):
+                    for line in stdout_text.split("\n"):
+                        m = re.match(r"^\s*(\d+)\s+([-+]?\d+\.\d+)", line)
+                        if m and int(m.group(1)) == idx: return m.group(2)
+                    return "N/A"
                 
-                temp_pdb = "temp_lig_state.pdb"
-                Chem.MolToPDBFile(mol, temp_pdb)
-                convert_pdb_to_pdbqt(temp_pdb, "ligand.pdbqt", is_ligand=True)
+                pose_affinity_score = get_pose_affinity(st.session_state.docking_results_raw, selected_pose)
+                active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
                 
-                st.session_state.ligand_ready = True
-                st.session_state.smiles_cache = temp_in
-                st.session_state.ligand_summary_text = "Ligand structure loaded successfully."
-                with open("ligand.pdbqt", "r") as f:
-                    st.session_state.serialized_ligand_block = f.read()
+                amino_acid_categories = {"Acidic (-ve)": [], "Basic (+ve)": [], "Polar (Neutral)": [], "Hydrophobic": []}
+                for item in active_interactions:
+                    res_full = item["Residue Contact"]
+                    res_name = "".join([c for c in res_full if c.isalpha()]).upper()
+                    if res_name in ["ASP", "GLU"]: amino_acid_categories["Acidic (-ve)"].append(res_full)
+                    elif res_name in ["LYS", "ARG", "HIS"]: amino_acid_categories["Basic (+ve)"].append(res_full)
+                    elif res_name in ["SER", "THR", "ASN", "GLN", "CYS", "TYR"]: amino_acid_categories["Polar (Neutral)"].append(res_full)
+                    else: amino_acid_categories["Hydrophobic"].append(res_full)
                 
-                if os.path.exists(temp_in):
-                    os.remove(temp_in)
-                if os.path.
+                breakdown_html = ""
+                report_breakdown_text = ""
+                for cat_name, res_list in amino_acid_categories.items():
+                    if res_list:
+                        labels_joined = ", ".join(list(set(res_list)))
+                        breakdown_html += f"<p style='margin:4px 0; font-size:13px;'><b>{cat_name}:</b> <span style='color:#333;'>{labels_joined}</span></p>"
+                        report_breakdown_text += f"- {cat_name}: {labels_joined}\n"
+                if not breakdown_html: 
+                    breakdown_html = "<p style='margin:4px 0; color:#777; font-size:13px;'>No pocket interactions detected.</p>"
+                    report_breakdown_text = "- No close contacts detected under 3.8 Angstroms.\n"
+
+                html_metric_card = """
+                <div style="background-color:#f0f7f4; border-left:6px solid #2e7d32; padding:16px; border-radius:8px; margin-bottom:15px; font-family:sans-serif;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #e0e8e4; padding-bottom:8px; margin-bottom:10px;">
+                        <div>
+                            <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Active Pose Affinity</span><br>
+                            <span style="font-size:36px; font-weight:900; color:#1b5e20;">{} <span style="font-size:18px; font-weight:normal;">kcal/mol</span></span>
+                        </div>
+                        <div style="text-align:right; border-left:1px solid #e0e8e4; padding-left:15px;">
+                            <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Total Contacts</span><br>
+                            <span style="font-size:32px; font-weight:800; color:#2e7d32;">{}</span>
+                        </div>
+                    </div>
+                    <div>
+                        <span style="font-size:11px; color:#666; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px; display:block; margin-bottom:4px;">Binding Site Amino Acid Properties Breakdown:</span>
+                        {}
+                    </div>
+                </div>
+                """.format(pose_affinity_score, len(active_interactions), breakdown_html)
+                st.html(html_metric_card)
+                
+                col_render, col_mesh = st.columns([1, 1])
+                with col_render:
+                    style_mode = re.sub(r'\W+', '', st.radio("Macromolecule Style Mode:", ["Cartoon Ribbon Mesh", "Spacefill (VDW Configuration)", "Sticks Profile"]).split()[0].lower())
+                with col_mesh:
+                    surf_toggle = st.checkbox("Overlay Translucent Pocket Cavity Mesh", value=False)
+                    
+                render_advanced_modeling_blueprint(receptor_data=protein_data, ligand_data=parsed_poses[selected_pose], mode=style_mode, show_surface=surf_toggle, interactions_list=active_interactions)
+                
+                # --- AUTOMATED COMPREHENSIVE MOLECULAR INTERACTION REPORT ENGINE ---
+                st.write("---")
+                st.subheader("📋 Comprehensive In Silico Screening Report")
+                
+                report_content = f"""=======================================================
+MOLECULAR DOCKING SCREENING ANALYSIS REPORT
+Generated dynamically via InSilico BioSphere Docking Tool
+Developed by: Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, Shivaji Science College, Nagpur, India | Contact: sarangresearch@gmail.com
+=======================================================
+
+1. TARGET RECEPTOR MACROMOLECULE PROFILE
+-------------------------------------------------------
+- Target Configuration Identifier: {st.session_state.pdb_id_display}
+- Primary Structure Data Source: RCSB Protein Data Bank Server
+
+2. SMALL MOLECULE DRUG LIGAND PROFILE
+-------------------------------------------------------
+- Input Structural Identity Matrix: {st.session_state.get('smiles_cache', 'Uploaded File Data Track')}
+- Compiled Chemical Attributes: {st.session_state.ligand_summary_text.replace('**','')}
+
+3. BOUND SPACE CONFIGURATION MECHANICS (GRID BOX)
+-------------------------------------------------------
+- Center Coordinates Vector (X, Y, Z): ({grid_cx}, {grid_cy}, {grid_cz})
+- Grid Bounding Dimensions (X, Y, Z): ({grid_sx} Å, {grid_sy} Å, {grid_sz} Å)
+- Search Algorithm Exhaustiveness Index: {exhaustiveness}
+
+4. ACTIVE POSE COMPLEX BINDING METRICS (SELECTED MODE)
+-------------------------------------------------------
+- Target Alignment Selection Mode: Mode {selected_pose} Pose Fit
+- Computed Gibbs Free Energy Affinity: {pose_affinity_score} kcal/mol
+- Measured Total Spatial Proximity Contact Atoms: {len(active_interactions)}
+
+5. POCKET CONTACT RESIDUES PROACTIVE BREAKDOWN
+-------------------------------------------------------
+{report_breakdown_text}
+=======================================================
+Report compiled successfully. Ready for manuscript citation.
+**InSilico BioSphere: An Integrated Platform for Automated Molecular Docking.**
+    Developed by Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, 
+    Shivaji Science College, Nagpur, India.
+=======================================================
+"""
+                st.text_area("Copy Code Summary Report Log Sheet Block directly:", value=report_content, height=320)
+                
+                st.subheader("🧬 Local Contact Residues & Bond Assignments Matrix")
+                if active_interactions:
+                    df_int = pd.DataFrame(active_interactions)
+                    st.dataframe(df_int[["Residue Contact", "Interaction Type", "Distance (Å)"]], hide_index=True, use_container_width=True)
+                else:
+                    st.info("No close contacts detected within a 3.8 Å threshold radius.")
+        else:
+            st.info("Initializing active layout matrices workspace pipelines...")
+
+    # --- ENGINE COMPUTATION EXECUTION BOUNDARY ---
+    if run_btn and can_dock:
+        with st.spinner("Processing calculations..."):
+            vina_command = ["./vina", "--receptor", "protein.pdbqt", "--ligand", "ligand.pdbqt", "--center_x", str(grid_cx), "--center_y", str(grid_cy), "--center_z", str(grid_cz), "--size_x", str(grid_sx), "--size_y", str(grid_sy), "--size_z", str(grid_sz), "--exhaustiveness", str(exhaustiveness), "--out", "docking_poses.pdbqt"]
+            try:
+                process = subprocess.run(vina_command, capture_output=True, text=True, check=True)
+                if process.stdout:
+                    st.session_state.docking_results_raw = process.stdout
+                    st.success("Calculations complete!")
+                    st.rerun()
+            except subprocess.CalledProcessError as err: st.error("Calculations exited with error flags."); st.code(err.stderr if err.stderr else err.stdout)
+
+# --- GLOBAL DATAFRAME ANALYTICS DISPLAY ZONE ---
+if st.session_state.docking_results_raw is not None:
+    st.write("---")
+    st.header("📊 Screening Metrics Dashboard & Data Export")
+    
+    def parse_vina_output_with_residues(stdout_text):
+        data = []
+        pattern = re.compile(r"^\s*(\d+)\s+([-+]?\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)")
+        poses_dict = split_docking_poses("docking_poses.pdbqt")
+        for line in stdout_text.split("\n"):
+            match = pattern.match(line)
+            if match:
+                mode_idx = int(match.group(1))
+                res_string, bond_types = "N/A", "N/A"
+                if mode_idx in poses_dict:
+                    ints = compute_spatial_interactions("protein.pdbqt", poses_dict[mode_idx])
+                    if ints:
+                        res_string = ", ".join(list(set([i["Residue Contact"] for i in ints])))
+                        bond_types = ", ".join(list(set([i["Interaction Type"] for i in ints])))
+                data.append({"Binding Mode": mode_idx, "Affinity (kcal/mol)": float(match.group(2)), "RMSD l.b.": float(match.group(3)), "RMSD u.b.": float(match.group(4)), "Interacting Residues": res_string, "Contact Bond Types": bond_types})
+        return pd.DataFrame(data)
+
+    df_results = parse_vina_output_with_residues(st.session_state.docking_results_raw)
+    if not df_results.empty:
+        col_table, col_export = st.columns([2, 1])
+        with col_table: st.dataframe(df_results, hide_index=True, use_container_width=True)
+        with col_export:
+            csv_data = df_results.to_csv(index=False).encode('utf-8')
+            st.download_button(label="📥 Download Data Sheet (.CSV)", data=csv_data, file_name="screening_affinity_report.csv", mime="text/csv", use_container_width=True)
