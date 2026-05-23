@@ -427,42 +427,40 @@ with col_params:
                 except Exception as e: st.error(f"SMILES Parsing Failure: {e}")
             
     elif ligand_source == "Upload Structural File (.pdb, .sdf)" and uploaded_lig_buffer is not None:
-        temp_in = f"raw_ligand_{uploaded_lig_name}"
-        with open(temp_in, "wb") as f:
-            f.write(uploaded_lig_buffer.getbuffer())
-        
-        mol = Chem.MolFromPDBFile(temp_in, removeHs=False) if uploaded_lig_name.endswith(".pdb") else Chem.SDMolSupplier(temp_in, removeHs=False)[0]
-        
-        if mol:
-            try:
-                Chem.SanitizeMol(mol)
-                AllChem.AssignBondOrdersFromTopology(mol)
-            except Exception:
-                pass
+            temp_in = f"raw_ligand_{uploaded_lig_name}"
+            with open(temp_in, "wb") as f:
+                f.write(uploaded_lig_buffer.getbuffer())
             
-            if mol.GetNumConformers() == 0:
-                mol = Chem.AddHs(mol)
-                AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
-                AllChem.MMFFOptimizeMolecule(mol)
+            mol = Chem.MolFromPDBFile(temp_in, removeHs=False) if uploaded_lig_name.endswith(".pdb") else Chem.SDMolSupplier(temp_in, removeHs=False)[0]
             
-            temp_pdb = "temp_lig_state.pdb"
-            Chem.MolToPDBFile(mol, temp_pdb)
-            convert_pdb_to_pdbqt(temp_pdb, "ligand.pdbqt", is_ligand=True)
-            
-            st.session_state.ligand_ready = True
-            st.session_state.smiles_cache = temp_in
-            with open("ligand.pdbqt", "r") as f:
-                st.session_state.serialized_ligand_block = f.read()
-            
-            if os.path.exists(temp_in):
-                os.remove(temp_in)
-            if os.path.exists(temp_pdb):
-                os.remove(temp_pdb)
-            st.success("Structural file loaded and ready for docking!")
+            if mol:
+                try:
+                    Chem.SanitizeMol(mol)
+                    AllChem.AssignBondOrdersFromTopology(mol)
+                except Exception:
+                    pass
                 
-                if os.path.exists(temp_in): os.remove(temp_in)
-                if os.path.exists(temp_pdb): os.remove(temp_pdb)
-                st.success("Structural file and metadata loaded!")
+                if mol.GetNumConformers() == 0:
+                    mol = Chem.AddHs(mol)
+                    AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
+                    AllChem.MMFFOptimizeMolecule(mol)
+                
+                temp_pdb = "temp_lig_state.pdb"
+                Chem.MolToPDBFile(mol, temp_pdb)
+                convert_pdb_to_pdbqt(temp_pdb, "ligand.pdbqt", is_ligand=True)
+                
+                st.session_state.ligand_ready = True
+                st.session_state.smiles_cache = temp_in
+                st.session_state.ligand_summary_text = "Ligand structure loaded successfully from uploaded file matrix."
+                with open("ligand.pdbqt", "r") as f:
+                    st.session_state.serialized_ligand_block = f.read()
+                
+                if os.path.exists(temp_in):
+                    os.remove(temp_in)
+                if os.path.exists(temp_pdb):
+                    os.remove(temp_pdb)
+                
+                st.success("Structural file loaded and ready for docking!")
                 st.rerun()
 
     if st.session_state.target_ready and os.path.exists("ligand.pdbqt"):
