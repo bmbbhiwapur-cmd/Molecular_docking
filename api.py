@@ -461,7 +461,6 @@ with col_params:
                     os.remove(temp_pdb)
                 
                 st.success("Structural file loaded and ready for docking!")
-                st.rerun()
 
     if st.session_state.target_ready and os.path.exists("ligand.pdbqt"):
         st.session_state.ligand_ready = True
