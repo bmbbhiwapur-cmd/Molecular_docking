@@ -115,9 +115,355 @@ def parse_bound_ligands(file_path):
         cx, cy, cz = sum([p[0] for p in pts])/n_atoms, sum([p[1] for p in pts])/n_atoms, sum([p[2] for p in pts])/n_atoms
         bx = max([p[0] for p in pts]) - min([p[0] for p in pts]) + 10.0
         by = max([p[1] for p in pts]) - min([p[1] for p in pts]) + 10.0
-       cx, cy, cz = sum([p[0] for p in pts])/n_atoms, sum([p[1] for p in pts])/n_atoms, sum([p[2] for p in pts])/n_atoms
-        bx = max([p[0] for p in pts]) - min([p[0] for p in pts]) + 10.0
-        by = max([p[1] for p in pts]) - min([p[1] for p in pts]) + 10.0
-        
-        # This line was cut off. Here is the complete, closed expression:
         bz = max([p[2] for p in pts]) - min([p[2] for p in pts]) + 10.0
+        
+        processed_ligands.append({
+            "ID": info["res"], "Chain": info["chain"], "ResSeq": info["seq"], "Atoms": n_atoms,
+            "cx": round(cx, 2), "cy": round(cy, 2), "cz": round(cz, 2),
+            "bx": round(bx, 1), "by": round(by, 1), "bz": round(bz, 1)
+        })
+    return processed_ligands
+
+
+# --- ADVANCED BIOPHYSICAL INTERACTION PARSER ENGINE ---
+
+def parse_pdbqt_coordinates(pdbqt_string):
+    atoms = []
+    for line in pdbqt_string.split("\n"):
+        if line.startswith(("ATOM", "HETATM")):
+            try:
+                x = float(line[30:38].strip())
+                y = float(line[38:46].strip())
+                z = float(line[46:54].strip())
+                element = line[76:78].strip().upper()
+                res_name = line[17:20].strip()
+                res_seq = line[22:26].strip()
+                atoms.append({"coord": np.array([x, y, z]), "element": element, "res": f"{res_name}{res_seq}"})
+            except ValueError: continue
+    return atoms
+
+def compute_spatial_interactions(receptor_file, ligand_pdbqt_str):
+    interactions = []
+    if not os.path.exists(receptor_file): return interactions
+    
+    with open(receptor_file, "r") as f:
+         receptor_atoms = parse_pdbqt_coordinates(f.read())
+    ligand_atoms = parse_pdbqt_coordinates(ligand_pdbqt_str)
+    
+    seen = set()
+    for l_at in ligand_atoms:
+        for r_at in receptor_atoms:
+            dist = np.linalg.norm(l_at["coord"] - r_at["coord"])
+            if dist < 3.8: 
+                res_id = r_at["res"]
+                if res_id in seen: continue
+                
+                if l_at["element"] in ["N", "O", "F", "S"] and r_at["element"] in ["N", "O", "F", "S"]:
+                    b_type = "Hydrogen Bond"
+                elif "A" in r_at["element"] or (l_at["element"] == "C" and r_at["element"] == "C" and any(aro in r_at["res"] for aro in ["PHE", "TYR", "TRP"])):
+                    b_type = "pi-Stacking / Hydrophobic"
+                else:
+                    b_type = "van der Waals Contact"
+                    
+                seen.add(res_id)
+                interactions.append({
+                    "Residue Contact": res_id,
+                    "Interaction Type": b_type,
+                    "Distance (Å)": round(dist, 2),
+                    "r_coord": r_at["coord"].tolist(),
+                    "l_coord": l_at["coord"].tolist()
+                })
+    return interactions
+
+
+# --- BIOINFORMATICS STRUCTURAL CONVERTERS ---
+
+def fetch_pdb_from_rcsb(pdb_id):
+    pdb_id = pdb_id.strip().lower()
+    url = f"https://files.rcsb.org/download/{pdb_id}.pdb"
+    local_pdb = f"{pdb_id}.pdb"
+    try:
+        urllib.request.urlretrieve(url, local_pdb)
+        return True, local_pdb
+    except Exception:
+        return False, f"Could not find or download PDB ID '{pdb_id.upper()}'."
+
+def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=False):
+    autodock_type_map = {
+        "H": "H", "HD": "HD", "HS": "HS", "C": "C", "A": "A", "N": "N", "NA": "NA", 
+        "NS": "NS", "O": "O", "OA": "OA", "S": "S", "SA": "SA", "P": "P", "F": "F", 
+        "CL": "Cl", "BR": "Br", "I": "I", "ZN": "Zn", "MG": "Mg"
+    }
+    torsions = 0
+    if is_ligand:
+        try:
+            mol = Chem.MolFromPDBFile(input_pdb, removeHs=False)
+            if mol: torsions = AllChem.CalcNumRotatableBonds(mol)
+        except Exception: torsions = 4
+    try:
+        with open(input_pdb, "r") as pdb, open(output_pdbqt, "w") as pdbqt:
+            if is_ligand: pdbqt.write("ROOT\n")
+            for line in pdb:
+                if line.startswith(("ATOM", "HETATM")):
+                    record_type = line[:6].strip()
+                    try: atom_id = int(line[6:11].strip())
+                    except ValueError: atom_id = 1
+                    atom_name = line[12:16]
+                    res_name = line[17:20].strip()
+                    chain_id = line[21].strip() if line[21].strip() else "A"
+                    try: res_seq = int(line[22:26].strip())
+                    except ValueError: res_seq = 1
+                    try: x, y, z = float(line[30:38].strip()), float(line[38:46].strip()), float(line[46:54].strip())
+                    except ValueError: continue
+                    element = line[76:78].strip()
+                    if not element: element = ''.join([c for c in atom_name if c.isalpha()])[0]
+                    element = ''.join([c for c in element if c.isalpha()]).upper()
+                    vina_type = autodock_type_map.get(element, element.title())
+                    if element == "C" and "AR" in atom_name.upper(): vina_type = "A"
+                    pdbqt.write(f"{record_type:<6}{atom_id:>5} {atom_name:<4} {res_name:>3} {chain_id}{res_seq:>4}    {x:>8.3f}{y:>8.3f}{z:>8.3f}{1.00:>6.2f}{0.00:>6.2f}    +0.000 {vina_type:<2}\n")
+            if is_ligand:
+                pdbqt.write("ENDROOT\n")
+                pdbqt.write(f"TORSDOF {torsions}\n")
+            else: pdbqt.write("ENDMDL\n")
+        return True, output_pdbqt
+    except Exception as e: return False, str(e)
+
+def convert_smiles_to_pdbqt(smiles_string, output_filename="ligand.pdbqt"):
+    try:
+        mol = Chem.MolFromSmiles(smiles_string)
+        if mol is None: return False, "Invalid SMILES."
+        mol = Chem.AddHs(mol)
+        AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
+        AllChem.MMFFOptimizeMolecule(mol)
+        temp_pdb = "temp_ligand.pdb"
+        Chem.MolToPDBFile(mol, temp_pdb)
+        convert_pdb_to_pdbqt(temp_pdb, output_filename, is_ligand=True)
+        if os.path.exists(temp_pdb): os.remove(temp_pdb)
+        return True, output_filename
+    except Exception as e: return False, str(e)
+
+
+# --- LOG FILE PARSERS ---
+
+def split_docking_poses(poses_file_path):
+    poses = {}
+    if not os.path.exists(poses_file_path): return poses
+    current_mode, current_lines = None, []
+    with open(poses_file_path, "r") as f:
+        for line in f:
+            if line.startswith("MODEL"):
+                try: current_mode = int(line.split()[1])
+                except Exception: current_mode = len(poses) + 1
+                current_lines = []
+            elif line.startswith("ENDMDL"):
+                if current_mode is not None: poses[current_mode] = "".join(current_lines)
+                current_mode = None
+            else: current_lines.append(line)
+    return poses
+
+
+# --- HIGH PERFORMANCE VISUALIZATION CONSTRUCTS ---
+
+def generate_2d_ligand_img(mol):
+    if mol is None: return None
+    try:
+        mol_flat = Chem.Mol(mol)
+        Chem.SanitizeMol(mol_flat)
+        AllChem.Compute2DCoords(mol_flat)
+        img = Draw.MolToImage(mol_flat, size=(340, 260))
+        import io
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode('utf-8')
+    except Exception: return None
+
+def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon", show_surface=False, interactions_list=[]):
+    surface_js = "viewer.addSurface($3Dmol.SurfaceType.VDW, {opacity:0.45, colorscheme:{prop:'b',gradient:'rwb'}}, {model:0});" if show_surface else ""
+    int_lines_js = ""
+    for interact in interactions_list:
+        rc = interact["r_coord"]
+        lc = interact["l_coord"]
+        color = "yellow" if "Hydrogen" in interact["Interaction Type"] else "cyan"
+        int_lines_js += f"""
+        viewer.addCylinder({{start:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, end:{{x:{lc[0]}, y:{lc[1]}, z:{lc[2]}}}, radius:0.07, color:'{color}', dashed:true}});
+        viewer.addLabel("{interact['Residue Contact']} ({interact['Distance (Å)']}A)", {{position:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, backgroundColor:'white', fontColor:'black', backgroundOpacity:0.8, fontSize:11}});
+        """
+
+    html_content = f"""
+    <div id="wrapper_div" style="position:relative; width:100%;">
+        <button onclick="toggleFullScreen()" style="position:absolute; top:12px; right:12px; z-index:9999; padding:6px 12px; background:#007bff; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:bold; font-family:sans-serif; box-shadow:0 2px 4px rgba(0,0,0,0.15);">🖥 Fullscreen View</button>
+        <div id="container" style="height: 480px; width: 100%; position: relative; border-radius:10px; border:1px solid #eaeaea; background:#ffffff;"></div>
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.0.4/3Dmol-min.js"></script>
+    <script>
+        let viewer = $3Dmol.createViewer(document.getElementById('container'), {{backgroundColor: '#ffffff'}});
+        if (`{receptor_data}`.trim().length > 0) {{
+            viewer.addModel(`{receptor_data}`, 'pdb');
+            if ('{mode}' === 'cartoon') {{
+                viewer.setStyle({{model: 0}}, {{cartoon: {{colorscheme: 'chain', style: 'oval', thickness: 0.6}}}});
+            }} else if ('{mode}' === 'spacefill') {{
+                viewer.setStyle({{model: 0}}, {{sphere: {{colorscheme: 'chain', radius:1.1}}}});
+            }} else {{
+                viewer.setStyle({{model: 0}}, {{stick: {{colorscheme: 'chain', radius:0.25}}}});
+            }}
+        }}
+        {surface_js}
+        if (`{ligand_data}`.trim().length > 0) {{
+            viewer.addModel(`{ligand_data}`, 'pdb');
+            viewer.setStyle({{model: 1}}, {{stick: {{colorscheme: 'greenCarbon', radius: 0.28}}}});
+        }}
+        {int_lines_js}
+        viewer.zoomTo(); viewer.render();
+        function toggleFullScreen() {{
+            let elem = document.getElementById("wrapper_div");
+            if (!document.fullscreenElement) {{ elem.requestFullscreen(); document.getElementById("container").style.height = "90vh"; }}
+            else {{ document.exitFullscreen(); document.getElementById("container").style.height = "480px"; }}
+        }}
+        document.addEventListener('fullscreenchange', () => {{ if (!document.fullscreenElement) document.getElementById("container").style.height = "480px"; }});
+    </script>
+    """
+    components.html(html_content, height=510)
+
+
+# --- APPLICATION DASHBOARD WORKSPACE ---
+
+st.set_page_config(page_title="In Silico Docking Hub", layout="wide")
+st.title("🔬 InSilico BioSphere - Docking + ADME + Redesign")
+st.markdown("""
+**InSilico BioSphere** | Developed by: Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, Shivaji Science College, Nagpur, India | Contact: sarangresearch@gmail.com
+""")
+# Initialize states safely
+if "cx" not in st.session_state: st.session_state.cx = 0.0
+if "cy" not in st.session_state: st.session_state.cy = 0.0
+if "cz" not in st.session_state: st.session_state.cz = 0.0
+if "sx" not in st.session_state: st.session_state.sx = 20
+if "sy" not in st.session_state: st.session_state.sy = 20
+if "sz" not in st.session_state: st.session_state.sz = 20
+if "target_ready" not in st.session_state: st.session_state.target_ready = False
+if "ligand_ready" not in st.session_state: st.session_state.ligand_ready = False
+if "local_target_path" not in st.session_state: st.session_state.local_target_path = None
+if "pdb_id_display" not in st.session_state: st.session_state.pdb_id_display = "Custom"
+if "docking_results_raw" not in st.session_state: st.session_state.docking_results_raw = None
+if "serialized_ligand_block" not in st.session_state: st.session_state.serialized_ligand_block = None
+if "ligand_summary_text" not in st.session_state: st.session_state.ligand_summary_text = ""
+if "smiles_cache" not in st.session_state: st.session_state.smiles_cache = ""
+
+# --- MASTER ENVIRONMENT RESET ACTIONS ---
+if st.button("🔄 Reset Entire Environment for Fresh Docking", type="secondary", use_container_width=True):
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    # Clean system background operational scratch files
+    for f in ["protein.pdbqt", "ligand.pdbqt", "docking_poses.pdbqt", "temp_lig_state.pdb"]:
+        if os.path.exists(f): os.remove(f)
+    st.success("Dashboard cache and runtime structures completely cleared!")
+    st.rerun()
+
+col_params, col_visual = st.columns([1, 1])
+
+with col_params:
+    st.header("1. Target Protein Setup")
+    protein_source = st.radio("Choose Protein Input Method:", ["Type 4-Letter PDB ID", "Upload File (.pdb or .pdbqt)"])
+    
+    if protein_source == "Type 4-Letter PDB ID":
+        pdb_id_input = st.text_input("Enter RCSB PDB ID", value="2AMB").strip()
+        if st.button("📥 Load Target Structure"):
+            if pdb_id_input:
+                success, path = fetch_pdb_from_rcsb(pdb_id_input)
+                if success:
+                    st.session_state.local_target_path = path
+                    st.session_state.pdb_id_display = pdb_id_input.upper()
+                    conv_ok, _ = convert_pdb_to_pdbqt(path, "protein.pdbqt")
+                    st.session_state.target_ready = conv_ok
+                    st.success(f"Protein {pdb_id_input.upper()} successfully loaded!")
+                    st.rerun()
+                else: st.error(path)
+    else:
+        uploaded_file = st.file_uploader("Upload Target Protein File", type=["pdb", "pdbqt"])
+        if uploaded_file:
+            path = f"uploaded_{uploaded_file.name}"
+            if st.session_state.local_target_path != path:
+                with open(path, "wb") as f: f.write(uploaded_file.getbuffer())
+                st.session_state.local_target_path = path
+                st.session_state.pdb_id_display = "Uploaded File"
+                if uploaded_file.name.endswith(".pdb"):
+                    conv_ok, _ = convert_pdb_to_pdbqt(path, "protein.pdbqt")
+                    st.session_state.target_ready = conv_ok
+                else:
+                    os.replace(path, "protein.pdbqt")
+                    st.session_state.target_ready = True
+                    st.session_state.local_target_path = None
+                st.rerun()
+
+    if st.session_state.target_ready and st.session_state.local_target_path:
+        meta = extract_pdb_metadata(st.session_state.local_target_path, st.session_state.pdb_id_display)
+        st.markdown(f"""
+        > **Protein Summary Profile:** \n> * **Title:** {meta['title']}  
+        > * **PDB ID:** `{meta['id']}` | **Classification:** {meta['class']}  
+        > * **Organism(s):** *{meta['organism']}* | **Expression System:** {meta['system']}  
+        > * **Experimental Method:** {meta['method']} | **Resolution:** **{meta['res']}**
+        """)
+
+    st.header("2. Small Molecule Ligand Setup")
+    ligand_source = st.radio("Choose Ligand Input Method:", ["SMILES String Input", "Upload Structural File (.pdb, .sdf)"])
+    
+    smiles_input_val = ""
+    uploaded_lig_buffer = None
+    uploaded_lig_name = ""
+
+    if ligand_source == "SMILES String Input":
+        smiles_input_val = st.text_input("Enter Ligand SMILES String", "CC(=O)NC1=CC=C(O)C=C1").strip()
+    else:
+        uploaded_lig_file = st.file_uploader("Upload Small Molecule File", type=["pdb", "sdf"])
+        if uploaded_lig_file:
+            uploaded_lig_buffer = uploaded_lig_file
+            uploaded_lig_name = uploaded_lig_file.name
+
+    if st.button("📥 Load Ligand Structure", key="load_ligand_btn"):
+        if ligand_source == "SMILES String Input" and smiles_input_val:
+            with st.spinner("Querying PubChem Repositories..."):
+                pub_data = fetch_ligand_data_from_pubchem(smiles_input_val)
+                try:
+                    mol = Chem.MolFromSmiles(smiles_input_val)
+                    if mol:
+                        ok, _ = convert_smiles_to_pdbqt(smiles_input_val, "ligand.pdbqt")
+                        if ok:
+                            st.session_state.ligand_ready = True
+                            st.session_state.smiles_cache = smiles_input_val
+                            with open("ligand.pdbqt", "r") as f: st.session_state.serialized_ligand_block = f.read()
+                            st.session_state.ligand_summary_text = f"**Name:** {pub_data['name']} | **Formula:** {pub_data['formula']} | **Molecular Weight:** {pub_data['mw']}"
+                            st.success("Ligand metadata mapped from PubChem!")
+                            st.rerun()
+                except Exception as e: st.error(f"SMILES Parsing Failure: {e}")
+            
+        elif ligand_source == "Upload Structural File (.pdb, .sdf)" and uploaded_lig_buffer is not None:
+            temp_in = f"raw_ligand_{uploaded_lig_name}"
+            with open(temp_in, "wb") as f:
+                f.write(uploaded_lig_buffer.getbuffer())
+            
+            mol = Chem.MolFromPDBFile(temp_in, removeHs=False) if uploaded_lig_name.endswith(".pdb") else Chem.SDMolSupplier(temp_in, removeHs=False)[0]
+            
+            if mol:
+                try:
+                    Chem.SanitizeMol(mol)
+                    AllChem.AssignBondOrdersFromTopology(mol)
+                except Exception:
+                    pass
+                
+                if mol.GetNumConformers() == 0:
+                    mol = Chem.AddHs(mol)
+                    AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
+                    AllChem.MMFFOptimizeMolecule(mol)
+                
+                temp_pdb = "temp_lig_state.pdb"
+                Chem.MolToPDBFile(mol, temp_pdb)
+                convert_pdb_to_pdbqt(temp_pdb, "ligand.pdbqt", is_ligand=True)
+                
+                st.session_state.ligand_ready = True
+                st.session_state.smiles_cache = temp_in
+                st.session_state.ligand_summary_text = "Ligand structure loaded successfully."
+                with open("ligand.pdbqt", "r") as f:
+                    st.session_state.serialized_ligand_block = f.read()
+                
+                if os.path.exists(temp_in):
+                    os.remove(temp_in)
+                if os.path.
