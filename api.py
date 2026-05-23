@@ -115,4 +115,9 @@ def parse_bound_ligands(file_path):
         cx, cy, cz = sum([p[0] for p in pts])/n_atoms, sum([p[1] for p in pts])/n_atoms, sum([p[2] for p in pts])/n_atoms
         bx = max([p[0] for p in pts]) - min([p[0] for p in pts]) + 10.0
         by = max([p[1] for p in pts]) - min([p[1] for p in pts]) + 10.0
-        bz = max([p[2] for p in pts]) - min(
+       cx, cy, cz = sum([p[0] for p in pts])/n_atoms, sum([p[1] for p in pts])/n_atoms, sum([p[2] for p in pts])/n_atoms
+        bx = max([p[0] for p in pts]) - min([p[0] for p in pts]) + 10.0
+        by = max([p[1] for p in pts]) - min([p[1] for p in pts]) + 10.0
+        
+        # This line was cut off. Here is the complete, closed expression:
+        bz = max([p[2] for p in pts]) - min([p[2] for p in pts]) + 10.0
