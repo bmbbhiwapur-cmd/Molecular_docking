@@ -639,17 +639,75 @@ Report compiled successfully. Ready for manuscript citation.
             st.info("Initializing active layout matrices workspace pipelines...")
 
     # --- ENGINE COMPUTATION EXECUTION BOUNDARY ---
-    if run_btn and can_dock:
-        with st.spinner("Processing calculations..."):
-            vina_command = ["./vina", "--receptor", "protein.pdbqt", "--ligand", "ligand.pdbqt", "--center_x", str(grid_cx), "--center_y", str(grid_cy), "--center_z", str(grid_cz), "--size_x", str(grid_sx), "--size_y", str(grid_sy), "--size_z", str(grid_sz), "--exhaustiveness", str(exhaustiveness), "--out", "docking_poses.pdbqt"]
-            try:
-                process = subprocess.run(vina_command, capture_output=True, text=True, check=True)
-                if process.stdout:
-                    st.session_state.docking_results_raw = process.stdout
-                    st.success("Calculations complete!")
-                    st.rerun()
-            except subprocess.CalledProcessError as err: st.error("Calculations exited with error flags."); st.code(err.stderr if err.stderr else err.stdout)
-
+if run_btn and can_dock:
+    vina_command = [
+        "./vina", "--receptor", "protein.pdbqt", "--ligand", "ligand.pdbqt", 
+        "--center_x", str(grid_cx), "--center_y", str(grid_cy), "--center_z", str(grid_cz), 
+        "--size_x", str(grid_sx), "--size_y", str(grid_sy), "--size_z", str(grid_sz), 
+        "--exhaustiveness", str(exhaustiveness), "--out", "docking_poses.pdbqt"
+    ]
+    
+    # 1. Initialize UI Containers for the Progress Bar and Status text
+    progress_bar = st.progress(0, text="Initializing computational engine...")
+    status_text = st.empty()
+    
+    try:
+        # 2. Run Popen with raw bytes (unbuffered) to catch real-time asterisk output
+        process = subprocess.Popen(
+            vina_command, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.STDOUT
+        )
+        
+        output_log = []
+        progress_count = 0
+        current_line = ""
+        
+        # 3. Read output byte-by-byte
+        while True:
+            # Read exactly 1 byte and decode it
+            char = process.stdout.read(1).decode("utf-8", errors="ignore")
+            
+            if not char: # Process has finished
+                break
+            
+            output_log.append(char)
+            
+            # Vina prints exactly 50 asterisks for its progress bar (each = 2%)
+            if char == '*':
+                progress_count += 1
+                percent = min(100, int((progress_count / 50) * 100))
+                progress_bar.progress(percent, text=f"Exploring binding modes... {percent}%")
+            
+            elif char == '\n':
+                # Parse completed lines for phase updates
+                if "Performing search" in current_line:
+                    status_text.info("Executing BFGS optimization and spatial search...")
+                elif "Refining" in current_line:
+                    status_text.info("Refining top structural poses...")
+                current_line = ""
+            else:
+                current_line += char
+        
+        # 4. Wait for absolute completion and handle final state
+        process.wait()
+        
+        if process.returncode == 0:
+            progress_bar.progress(100, text="Optimization complete!")
+            status_text.empty()
+            st.session_state.docking_results_raw = "".join(output_log)
+            
+            # Brief pause so the user registers the 100% completion before UI reload
+            import time
+            time.sleep(0.8) 
+            st.rerun()
+        else:
+            status_text.empty()
+            st.error("Engine encountered a calculation error.")
+            st.code("".join(output_log))
+            
+    except Exception as e:
+        st.error(f"Execution pipeline failed: {e}")
 # --- GLOBAL DATAFRAME ANALYTICS DISPLAY ZONE ---
 if st.session_state.docking_results_raw is not None:
     st.write("---")
