@@ -54,9 +54,7 @@ def fetch_ligand_data_from_pubchem(smiles_string):
 
 def extract_pdb_metadata(file_path, pdb_id="Custom"):
     meta = {
-        "name": "Unknown Protein",
-        "title": "Uploaded Protein Structure Matrix", 
-        "id": pdb_id.upper() if pdb_id and pdb_id != "Uploaded File" else "Unknown",
+        "title": "Uploaded Protein Structure Matrix", "id": pdb_id.upper(),
         "class": "Unknown Classification", "organism": "Unknown",
         "system": "Unknown Expression System", "method": "X-RAY DIFFRACTION", "res": "N/A"
     }
@@ -66,29 +64,14 @@ def extract_pdb_metadata(file_path, pdb_id="Custom"):
         title_parts = []
         for line in f:
             if line.startswith("TITLE"): title_parts.append(line[10:80].strip())
-            elif line.startswith("HEADER"): 
-                meta["class"] = line[10:50].strip().title()
-                if len(line) >= 66:
-                    possible_id = line[62:66].strip()
-                    if len(possible_id) == 4:
-                        meta["id"] = possible_id.upper()
-            elif line.startswith("COMPND"):
-                if "MOLECULE:" in line:
-                    mol_name = line.split("MOLECULE:")[1].split(";")[0].strip()
-                    if meta["name"] == "Unknown Protein":
-                        meta["name"] = mol_name.title()
+            elif line.startswith("HEADER"): meta["class"] = line[10:50].strip().title()
             elif "ORGANISM_SCIENTIFIC" in line: meta["organism"] = line.split(":")[-1].replace(";","").strip()
             elif "EXPRESSION_SYSTEM" in line: meta["system"] = line.split(":")[-1].replace(";","").strip()
             elif line.startswith("EXPDTA"): meta["method"] = line[10:80].strip()
             elif "RESOLUTION." in line and "ANGSTROMS." in line:
                 match = re.search(r"(\d+\.\d+)", line)
                 if match: meta["res"] = f"{match.group(1)} Å"
-                
     if title_parts: meta["title"] = " ".join(title_parts).title()
-    
-    if meta["name"] == "Unknown Protein" and meta["title"] != "Uploaded Protein Structure Matrix":
-        meta["name"] = meta["title"]
-        
     return meta
 
 def parse_bound_ligands(file_path):
@@ -403,7 +386,6 @@ st.markdown("""
 """)
 
 # Initialize states safely
-if "protein_name" not in st.session_state: st.session_state.protein_name = "Unknown Protein"
 if "cx" not in st.session_state: st.session_state.cx = 0.0
 if "cy" not in st.session_state: st.session_state.cy = 0.0
 if "cz" not in st.session_state: st.session_state.cz = 0.0
@@ -434,12 +416,6 @@ col_params, col_visual = st.columns([1, 1])
 
 with col_params:
     st.header("1. Target Protein Setup")
-    
-    # --- TEXT BOXES FOR PROTEIN IDENTIFICATION ---
-    st.text_input("Protein Name", placeholder="Hint: Type protein name here...", key="protein_name")
-    st.text_input("PDB ID / Code", placeholder="Hint: Type PDB ID here...", key="pdb_id_display")
-    st.write("---")
-    
     protein_source = st.radio("Choose Protein Input Method:", ["Type 4-Letter PDB ID", "Upload File (.pdb or .pdbqt)"])
     
     if protein_source == "Type 4-Letter PDB ID":
@@ -449,9 +425,7 @@ with col_params:
                 success, path = fetch_pdb_from_rcsb(pdb_id_input)
                 if success:
                     st.session_state.local_target_path = path
-                    meta = extract_pdb_metadata(path, pdb_id_input.upper())
-                    st.session_state.pdb_id_display = meta["id"]
-                    st.session_state.protein_name = meta["name"]
+                    st.session_state.pdb_id_display = pdb_id_input.upper()
                     conv_ok, _ = convert_pdb_to_pdbqt(path, "protein.pdbqt")
                     st.session_state.target_ready = conv_ok
                     st.success(f"Protein {pdb_id_input.upper()} successfully loaded!")
@@ -464,10 +438,7 @@ with col_params:
             if st.session_state.local_target_path != path:
                 with open(path, "wb") as f: f.write(uploaded_file.getbuffer())
                 st.session_state.local_target_path = path
-                meta = extract_pdb_metadata(path, "Uploaded File")
-                st.session_state.pdb_id_display = meta["id"]
-                st.session_state.protein_name = meta["name"]
-                
+                st.session_state.pdb_id_display = "Uploaded File"
                 if uploaded_file.name.endswith(".pdb"):
                     conv_ok, _ = convert_pdb_to_pdbqt(path, "protein.pdbqt")
                     st.session_state.target_ready = conv_ok
@@ -480,9 +451,8 @@ with col_params:
     if st.session_state.target_ready and st.session_state.local_target_path:
         meta = extract_pdb_metadata(st.session_state.local_target_path, st.session_state.pdb_id_display)
         st.markdown(f"""
-        > **Protein Summary Profile:** \n> * **Protein Name:** **{st.session_state.protein_name}**
-        > * **Title:** {meta['title']}  
-        > * **PDB ID:** `{st.session_state.pdb_id_display}` | **Classification:** {meta['class']}  
+        > **Protein Summary Profile:** \n> * **Title:** {meta['title']}  
+        > * **PDB ID:** `{meta['id']}` | **Classification:** {meta['class']}  
         > * **Organism(s):** *{meta['organism']}* | **Expression System:** {meta['system']}  
         > * **Experimental Method:** {meta['method']} | **Resolution:** **{meta['res']}**
         """)
@@ -713,9 +683,8 @@ Developed by: Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry,
 
 1. TARGET RECEPTOR MACROMOLECULE PROFILE
 -------------------------------------------------------
-- Target Protein Name: {st.session_state.protein_name}
-- Target Configuration Identifier (PDB ID): {st.session_state.pdb_id_display}
-- Primary Structure Data Source: RCSB Protein Data Bank Server / Local Upload
+- Target Configuration Identifier: {st.session_state.pdb_id_display}
+- Primary Structure Data Source: RCSB Protein Data Bank Server
 
 2. SMALL MOLECULE DRUG LIGAND PROFILE
 -------------------------------------------------------
@@ -742,8 +711,7 @@ Developed by: Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry,
 Report compiled successfully. Ready for manuscript citation.
 **InSilico BioSphere: An Integrated Platform for Automated Molecular Docking.**
     Developed by Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, 
-    Shivaji Science College, Nagpur, India.
-    Contact - sarangresearch@gmail.com
+    Shivaji Science College, Nagpur, India,contact - sarangresearch@gmail.com.
 =======================================================
 """
                 st.text_area("Copy Code Summary Report Log Sheet Block directly:", value=report_content, height=250)
@@ -757,7 +725,6 @@ Report compiled successfully. Ready for manuscript citation.
                 if st.session_state.local_target_path:
                     meta = extract_pdb_metadata(st.session_state.local_target_path, st.session_state.pdb_id_display)
                     meta_html = f"""
-                    <p><b>Protein Name:</b> {st.session_state.protein_name}</p>
                     <p><b>Title:</b> {meta['title']}</p>
                     <p><b>Classification:</b> {meta['class']} | <b>Organism(s):</b> {meta['organism']} | <b>Expression System:</b> {meta['system']}</p>
                     <p><b>Experimental Method:</b> {meta['method']} | <b>Resolution:</b> {meta['res']}</p>
@@ -847,7 +814,7 @@ Report compiled successfully. Ready for manuscript citation.
     
     <div class="section">
         <h2>1. Target Receptor Profile</h2>
-        <p><b>Target Identifier (PDB ID):</b> {st.session_state.pdb_id_display}</p>
+        <p><b>Target Identifier:</b> {st.session_state.pdb_id_display}</p>
         <p><b>Data Source:</b> RCSB Protein Data Bank / Local Upload</p>
         {meta_html}
         <h3>Bound Small Molecules in Receptor</h3>
@@ -904,8 +871,7 @@ Report compiled successfully. Ready for manuscript citation.
         <p>Report compiled successfully. Ready for manuscript citation.</p>
         <p><b>InSilico BioSphere: An Integrated Platform for Automated Molecular Docking.</b><br>
         Developed by Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry,<br>
-        Shivaji Science College, Nagpur, India.<br>
-        Email: contact - sarangresearch@gmail.com</p>
+        Shivaji Science College, Nagpur, India.</p>
     </div>
 </body>
 </html>"""
