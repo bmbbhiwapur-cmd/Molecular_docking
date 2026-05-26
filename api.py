@@ -597,12 +597,14 @@ with col_visual:
                 
                 breakdown_html = ""
                 report_breakdown_text = ""
+                has_contacts = False
                 for cat_name, res_list in amino_acid_categories.items():
                     if res_list:
+                        has_contacts = True
                         labels_joined = ", ".join(list(set(res_list)))
                         breakdown_html += f"<p style='margin:4px 0; font-size:13px;'><b>{cat_name}:</b> <span style='color:#333;'>{labels_joined}</span></p>"
                         report_breakdown_text += f"- {cat_name}: {labels_joined}\n"
-                if not breakdown_html: 
+                if not has_contacts: 
                     breakdown_html = "<p style='margin:4px 0; color:#777; font-size:13px;'>No pocket interactions detected.</p>"
                     report_breakdown_text = "- No close contacts detected under 3.8 Angstroms.\n"
 
@@ -704,8 +706,26 @@ Report compiled successfully. Ready for manuscript citation.
                     viewer.addCylinder({{start:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, end:{{x:{lc[0]}, y:{lc[1]}, z:{lc[2]}}}, radius:0.07, color:'{color}', dashed:true}});
                     viewer.addLabel("{interact['Residue Contact']}", {{position:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, backgroundColor:'white', fontColor:'black', backgroundOpacity:0.8, fontSize:10}});
                     """
+                    
+                # 4. Generate HTML for the Selected Pose Amino Acid Breakdown
+                html_breakdown_items = ""
+                if not has_contacts:
+                    html_breakdown_items = "<ul><li>No close contacts detected under 3.8 Angstroms.</li></ul>"
+                else:
+                    html_breakdown_items = "<ul>"
+                    for cat_name, res_list in amino_acid_categories.items():
+                        if res_list:
+                            labels_joined = ", ".join(list(set(res_list)))
+                            html_breakdown_items += f"<li><b>{cat_name}:</b> {labels_joined}</li>"
+                    html_breakdown_items += "</ul>"
+                    
+                # 5. Generate HTML for the Interaction Matrix Table
+                int_matrix_html = "<p>No close contacts detected under 3.8 Angstroms.</p>"
+                if active_interactions:
+                    df_int_html = pd.DataFrame(active_interactions)
+                    int_matrix_html = df_int_html[["Residue Contact", "Interaction Type", "Distance (Å)"]].to_html(index=False, classes="data-table")
                 
-                # 4. Construct the Full Offline HTML String
+                # 6. Construct the Full Offline HTML String
                 html_export_doc = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -724,7 +744,7 @@ Report compiled successfully. Ready for manuscript citation.
         .data-table th, .data-table td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
         .data-table th {{ background-color: #f2f2f2; color: #333; }}
         .footer {{ margin-top: 50px; font-size: 0.9em; color: #777; border-top: 1px solid #ddd; padding-top: 20px; text-align: center; }}
-        #viewer_container {{ height: 500px; width: 100%; position: relative; border-radius:8px; border:1px solid #ccc; background:#fff; margin-top:15px; }}
+        #viewer_container {{ height: 500px; width: 100%; position: relative; border-radius:8px; border:1px solid #ccc; background:#fff; margin-top:15px; margin-bottom:20px; }}
     </style>
 </head>
 <body>
@@ -761,8 +781,12 @@ Report compiled successfully. Ready for manuscript citation.
 
     <div class="section">
         <h2>5. Selected Pose Analysis (Mode {selected_pose})</h2>
-        <p><b>Affinity:</b> {pose_affinity_score} kcal/mol</p>
+        <p><b>Affinity:</b> <span style="font-size:1.1em; color:#1b5e20; font-weight:bold;">{pose_affinity_score} kcal/mol</span></p>
         <p><b>Total Proximity Contacts:</b> {len(active_interactions)}</p>
+        
+        <h3>Pocket Contact Residues Breakdown</h3>
+        {html_breakdown_items}
+
         <h3>Interactive 3D Protein-Ligand View</h3>
         <p style="font-size:0.85em; color:#666;">(Use mouse to rotate, scroll to zoom. Cyan lines = van der Waals / pi-Stacking. Yellow lines = Hydrogen Bonds)</p>
         <div id="viewer_container"></div>
@@ -776,6 +800,9 @@ Report compiled successfully. Ready for manuscript citation.
             {int_lines_js_offline}
             viewer.zoomTo(); viewer.render();
         </script>
+        
+        <h3>Local Contact Residues & Bond Assignments Matrix</h3>
+        {int_matrix_html}
     </div>
 
     <div class="footer">
