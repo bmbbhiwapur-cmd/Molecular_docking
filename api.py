@@ -840,7 +840,7 @@ Report compiled successfully. Ready for manuscript citation.
         <p>Report compiled successfully. Ready for manuscript citation.</p>
         <p><b>InSilico BioSphere: An Integrated Platform for Automated Molecular Docking.</b><br>
         Developed by Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry,<br>
-        Shivaji Science College, Nagpur, India.</p>
+        Shivaji Science College, Nagpur, India. contact - sarangresearch@gmail.com </p>
     </div>
 </body>
 </html>"""
