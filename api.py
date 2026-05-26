@@ -404,6 +404,7 @@ st.markdown("""
 
 # Initialize states safely
 if "protein_name" not in st.session_state: st.session_state.protein_name = "Unknown Protein"
+if "pdb_id_display" not in st.session_state: st.session_state.pdb_id_display = "Custom"
 if "cx" not in st.session_state: st.session_state.cx = 0.0
 if "cy" not in st.session_state: st.session_state.cy = 0.0
 if "cz" not in st.session_state: st.session_state.cz = 0.0
@@ -413,7 +414,6 @@ if "sz" not in st.session_state: st.session_state.sz = 20
 if "target_ready" not in st.session_state: st.session_state.target_ready = False
 if "ligand_ready" not in st.session_state: st.session_state.ligand_ready = False
 if "local_target_path" not in st.session_state: st.session_state.local_target_path = None
-if "pdb_id_display" not in st.session_state: st.session_state.pdb_id_display = "Custom"
 if "docking_results_raw" not in st.session_state: st.session_state.docking_results_raw = None
 if "serialized_ligand_block" not in st.session_state: st.session_state.serialized_ligand_block = None
 if "ligand_summary_text" not in st.session_state: st.session_state.ligand_summary_text = ""
@@ -436,10 +436,14 @@ with col_params:
     st.header("1. Target Protein Setup")
     
     # --- TEXT BOXES FOR PROTEIN IDENTIFICATION ---
-    st.text_input("Protein Name", placeholder="Hint: Type protein name here...", key="protein_name")
-    st.text_input("PDB ID / Code", placeholder="Hint: Type PDB ID here...", key="pdb_id_display")
-    st.write("---")
+    # We use 'value=' instead of 'key=' to avoid StreamlitAPIException overwrites
+    current_p_name = st.text_input("Protein Name", placeholder="Hint: Type protein name here...", value=st.session_state.protein_name)
+    current_p_id = st.text_input("PDB ID / Code", placeholder="Hint: Type PDB ID here...", value=st.session_state.pdb_id_display)
     
+    if current_p_name != st.session_state.protein_name: st.session_state.protein_name = current_p_name
+    if current_p_id != st.session_state.pdb_id_display: st.session_state.pdb_id_display = current_p_id
+    st.write("---")
+
     protein_source = st.radio("Choose Protein Input Method:", ["Type 4-Letter PDB ID", "Upload File (.pdb or .pdbqt)"])
     
     if protein_source == "Type 4-Letter PDB ID":
@@ -467,7 +471,6 @@ with col_params:
                 meta = extract_pdb_metadata(path, "Uploaded File")
                 st.session_state.pdb_id_display = meta["id"]
                 st.session_state.protein_name = meta["name"]
-                
                 if uploaded_file.name.endswith(".pdb"):
                     conv_ok, _ = convert_pdb_to_pdbqt(path, "protein.pdbqt")
                     st.session_state.target_ready = conv_ok
@@ -480,8 +483,7 @@ with col_params:
     if st.session_state.target_ready and st.session_state.local_target_path:
         meta = extract_pdb_metadata(st.session_state.local_target_path, st.session_state.pdb_id_display)
         st.markdown(f"""
-        > **Protein Summary Profile:** \n> * **Protein Name:** **{st.session_state.protein_name}**
-        > * **Title:** {meta['title']}  
+        > **Protein Summary Profile:** \n> * **Protein Name:** **{st.session_state.protein_name}** > * **Title:** {meta['title']}  
         > * **PDB ID:** `{st.session_state.pdb_id_display}` | **Classification:** {meta['class']}  
         > * **Organism(s):** *{meta['organism']}* | **Expression System:** {meta['system']}  
         > * **Experimental Method:** {meta['method']} | **Resolution:** **{meta['res']}**
