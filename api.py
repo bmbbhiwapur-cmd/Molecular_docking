@@ -380,7 +380,7 @@ def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon
 # --- APPLICATION DASHBOARD WORKSPACE ---
 
 st.set_page_config(page_title="In Silico Docking Hub", layout="wide")
-st.title("🔬 InSilico BioSphere - Docking + ADME + Redesign")
+st.title("🔬 InSilico BioSphere - Docking")
 st.markdown("""
 **InSilico BioSphere** | Developed by: Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, Shivaji Science College, Nagpur, India | Contact: sarangresearch@gmail.com
 """)
@@ -711,7 +711,7 @@ Developed by: Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry,
 Report compiled successfully. Ready for manuscript citation.
 **InSilico BioSphere: An Integrated Platform for Automated Molecular Docking.**
     Developed by Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, 
-    Shivaji Science College, Nagpur, India.
+    Shivaji Science College, Nagpur, India,contact - sarangresearch@gmail.com.
 =======================================================
 """
                 st.text_area("Copy Code Summary Report Log Sheet Block directly:", value=report_content, height=250)
