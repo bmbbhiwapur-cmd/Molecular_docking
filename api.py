@@ -290,6 +290,29 @@ def parse_vina_output_with_residues(stdout_text):
             data.append({"Binding Mode": mode_idx, "Affinity (kcal/mol)": float(match.group(2)), "RMSD l.b.": float(match.group(3)), "RMSD u.b.": float(match.group(4)), "Interacting Residues": res_string, "Contact Bond Types": bond_types})
     return pd.DataFrame(data)
 
+def build_styled_html_table(df):
+    """Custom function to inject red CSS styling for positive affinity scores in HTML Export"""
+    html = '<table class="data-table"><thead><tr>'
+    for col in df.columns:
+        html += f'<th>{col}</th>'
+    html += '</tr></thead><tbody>'
+    for _, row in df.iterrows():
+        html += '<tr>'
+        for col in df.columns:
+            val = row[col]
+            if col == 'Affinity (kcal/mol)':
+                try:
+                    if float(val) > 0:
+                        html += f'<td style="color: #c62828; font-weight: bold;">{val}</td>'
+                    else:
+                        html += f'<td style="color: #1b5e20;">{val}</td>'
+                except:
+                    html += f'<td>{val}</td>'
+            else:
+                html += f'<td>{val}</td>'
+        html += '</tr>'
+    html += '</tbody></table>'
+    return html
 
 # --- HIGH PERFORMANCE VISUALIZATION CONSTRUCTS ---
 
@@ -357,7 +380,7 @@ def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon
 # --- APPLICATION DASHBOARD WORKSPACE ---
 
 st.set_page_config(page_title="In Silico Docking Hub", layout="wide")
-st.title("🔬 InSilico BioSphere - Docking")
+st.title("🔬 InSilico BioSphere - Docking + ADME + Redesign")
 st.markdown("""
 **InSilico BioSphere** | Developed by: Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, Shivaji Science College, Nagpur, India | Contact: sarangresearch@gmail.com
 """)
@@ -588,6 +611,14 @@ with col_visual:
                     return "N/A"
                 
                 pose_affinity_score = get_pose_affinity(st.session_state.docking_results_raw, selected_pose)
+                
+                # --- DYNAMIC COLOR LOGIC FOR AFFINITY SCORE ---
+                try:
+                    aff_val = float(pose_affinity_score)
+                    aff_color = "#c62828" if aff_val > 0 else "#1b5e20" # Red if positive, Green if negative
+                except ValueError:
+                    aff_color = "#1b5e20"
+
                 active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
                 
                 amino_acid_categories = {"Acidic (-ve)": [], "Basic (+ve)": [], "Polar (Neutral)": [], "Hydrophobic": []}
@@ -617,7 +648,7 @@ with col_visual:
                     <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #e0e8e4; padding-bottom:8px; margin-bottom:10px;">
                         <div>
                             <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Active Pose Affinity</span><br>
-                            <span style="font-size:36px; font-weight:900; color:#1b5e20;">{} <span style="font-size:18px; font-weight:normal;">kcal/mol</span></span>
+                            <span style="font-size:36px; font-weight:900; color:{};">{} <span style="font-size:18px; font-weight:normal;">kcal/mol</span></span>
                         </div>
                         <div style="text-align:right; border-left:1px solid #e0e8e4; padding-left:15px;">
                             <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Total Contacts</span><br>
@@ -629,7 +660,7 @@ with col_visual:
                         {}
                     </div>
                 </div>
-                """.format(pose_affinity_score, len(active_interactions), breakdown_html)
+                """.format(aff_color, pose_affinity_score, len(active_interactions), breakdown_html)
                 st.html(html_metric_card)
                 
                 col_render, col_mesh = st.columns([1, 1])
@@ -711,7 +742,7 @@ Report compiled successfully. Ready for manuscript citation.
 
                 # 3. Gather Docking Results for HTML Table
                 df_results_all = parse_vina_output_with_residues(st.session_state.docking_results_raw)
-                docking_table_html = df_results_all.to_html(index=False, classes="data-table")
+                docking_table_html = build_styled_html_table(df_results_all)
                 
                 # 4. Generate Interaction Javascript for Offline HTML 3D Viewer
                 int_lines_js_offline = ""
@@ -811,7 +842,7 @@ Report compiled successfully. Ready for manuscript citation.
 
     <div class="section">
         <h2>5. Selected Pose Analysis (Mode {selected_pose})</h2>
-        <p><b>Affinity:</b> <span style="font-size:1.1em; color:#1b5e20; font-weight:bold;">{pose_affinity_score} kcal/mol</span></p>
+        <p><b>Affinity:</b> <span style="font-size:1.1em; color:{aff_color}; font-weight:bold;">{pose_affinity_score} kcal/mol</span></p>
         <p><b>Total Proximity Contacts:</b> {len(active_interactions)}</p>
         
         <h3>Pocket Contact Residues Breakdown</h3>
@@ -840,7 +871,7 @@ Report compiled successfully. Ready for manuscript citation.
         <p>Report compiled successfully. Ready for manuscript citation.</p>
         <p><b>InSilico BioSphere: An Integrated Platform for Automated Molecular Docking.</b><br>
         Developed by Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry,<br>
-        Shivaji Science College, Nagpur, India. contact - sarangresearch@gmail.com </p>
+        Shivaji Science College, Nagpur, India.</p>
     </div>
 </body>
 </html>"""
@@ -958,9 +989,27 @@ if st.session_state.docking_results_raw is not None:
         return pd.DataFrame(data)
 
     df_results_global = parse_vina_output_with_residues_global(st.session_state.docking_results_raw)
+    
     if not df_results_global.empty:
         col_table, col_export = st.columns([2, 1])
-        with col_table: st.dataframe(df_results_global, hide_index=True, use_container_width=True)
+        with col_table: 
+            # Highlight positive affinities in red in the Streamlit Dataframe
+            def style_affinity(val):
+                try:
+                    if float(val) > 0:
+                        return 'color: #c62828; font-weight: bold;'
+                    else:
+                        return 'color: #1b5e20;'
+                except Exception:
+                    return ''
+                    
+            try:
+                styled_df = df_results_global.style.map(style_affinity, subset=['Affinity (kcal/mol)'])
+            except AttributeError: # Fallback for older pandas versions
+                styled_df = df_results_global.style.applymap(style_affinity, subset=['Affinity (kcal/mol)'])
+                
+            st.dataframe(styled_df, hide_index=True, use_container_width=True)
+            
         with col_export:
             csv_data = df_results_global.to_csv(index=False).encode('utf-8')
             st.download_button(label="📥 Download Data Sheet (.CSV)", data=csv_data, file_name="screening_affinity_report.csv", mime="text/csv", use_container_width=True)
