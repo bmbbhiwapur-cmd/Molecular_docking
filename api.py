@@ -116,6 +116,26 @@ def parse_bound_ligands(file_path):
         })
     return processed_ligands
 
+def compute_protein_centroid(pdbqt_file):
+    """Calculates the geometric center and dimensions for a full-protein grid box."""
+    coords = []
+    if not os.path.exists(pdbqt_file): 
+        return 0.0, 0.0, 0.0, 20.0, 20.0, 20.0
+    
+    with open(pdbqt_file, "r") as f:
+        for line in f:
+            if line.startswith(("ATOM", "HETATM")):
+                try:
+                    coords.append([float(line[30:38]), float(line[38:46]), float(line[46:54])])
+                except ValueError: continue
+    
+    if not coords: return 0.0, 0.0, 0.0, 20.0, 20.0, 20.0
+    
+    arr = np.array(coords)
+    center = np.mean(arr, axis=0)
+    # Calculate bounding box dimensions + buffer for the search space
+    dims = np.max(arr, axis=0) - np.min(arr, axis=0) + 10.0 
+    return center[0], center[1], center[2], dims[0], dims[1], dims[2]
 
 # --- ADVANCED BIOPHYSICAL INTERACTION PARSER ENGINE ---
 
@@ -489,6 +509,18 @@ with col_params:
                 st.rerun()
 
     st.header("4. Search Space Mechanics (Grid Box)")
+    
+    # --- BLIND DOCKING IMPLEMENTATION ---
+    if st.button("🌐 Enable Blind Docking (Full Protein Surface)", use_container_width=True):
+        if st.session_state.target_ready and os.path.exists("protein.pdbqt"):
+            cx, cy, cz, sx, sy, sz = compute_protein_centroid("protein.pdbqt")
+            st.session_state.cx, st.session_state.cy, st.session_state.cz = cx, cy, cz
+            st.session_state.sx, st.session_state.sy, st.session_state.sz = sx, sy, sz
+            st.success("Grid box dynamically expanded to cover the entire macromolecule!")
+            st.rerun()
+        else:
+            st.error("Please load a valid target protein first to enable blind docking.")
+
     grid_cx = st.number_input("Center X Coordinate", value=float(st.session_state.cx), step=0.1)
     grid_cy = st.number_input("Center Y Coordinate", value=float(st.session_state.cy), step=0.1)
     grid_cz = st.number_input("Center Z Coordinate", value=float(st.session_state.cz), step=0.1)
