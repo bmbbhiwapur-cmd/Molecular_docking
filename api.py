@@ -340,7 +340,7 @@ def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon
 # --- APPLICATION DASHBOARD WORKSPACE ---
 
 st.set_page_config(page_title="In Silico Docking Hub", layout="wide")
-st.title("🔬 InSilico BioSphere - Docking")
+st.title("🔬 InSilico BioSphere - Docking + ADME + Redesign")
 st.markdown("""
 **InSilico BioSphere** | Developed by: Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, Shivaji Science College, Nagpur, India | Contact: sarangresearch@gmail.com
 """)
@@ -579,15 +579,14 @@ with col_visual:
                     else: amino_acid_categories["Hydrophobic"].append(res_full)
                 
                 breakdown_html = ""
-                report_breakdown_text = ""
+                has_contacts = False
                 for cat_name, res_list in amino_acid_categories.items():
                     if res_list:
+                        has_contacts = True
                         labels_joined = ", ".join(list(set(res_list)))
                         breakdown_html += f"<p style='margin:4px 0; font-size:13px;'><b>{cat_name}:</b> <span style='color:#333;'>{labels_joined}</span></p>"
-                        report_breakdown_text += f"- {cat_name}: {labels_joined}\n"
-                if not breakdown_html: 
+                if not has_contacts: 
                     breakdown_html = "<p style='margin:4px 0; color:#777; font-size:13px;'>No pocket interactions detected.</p>"
-                    report_breakdown_text = "- No close contacts detected under 3.8 Angstroms.\n"
 
                 html_metric_card = """
                 <div style="background-color:#f0f7f4; border-left:6px solid #2e7d32; padding:16px; border-radius:8px; margin-bottom:15px; font-family:sans-serif;">
@@ -617,49 +616,102 @@ with col_visual:
                     
                 render_advanced_modeling_blueprint(receptor_data=protein_data, ligand_data=parsed_poses[selected_pose], mode=style_mode, show_surface=surf_toggle, interactions_list=active_interactions)
                 
-                # --- AUTOMATED COMPREHENSIVE MOLECULAR INTERACTION REPORT ENGINE ---
+                # --- AUTOMATED COMPREHENSIVE HTML REPORT EXPORT ---
                 st.write("---")
-                st.subheader("📋 Comprehensive In Silico Screening Report")
+                st.subheader("📋 Comprehensive HTML Screening Report")
                 
-                report_content = f"""=======================================================
-MOLECULAR DOCKING SCREENING ANALYSIS REPORT
-Generated dynamically via InSilico BioSphere Docking Tool
-Developed by: Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, Shivaji Science College, Nagpur, India | Contact: sarangresearch@gmail.com
-=======================================================
+                # Prepare HTML bullet points for contacts
+                html_breakdown_items = ""
+                if not has_contacts:
+                    html_breakdown_items = "<ul><li>No close contacts detected under 3.8 Angstroms.</li></ul>"
+                else:
+                    html_breakdown_items = "<ul>"
+                    for cat_name, res_list in amino_acid_categories.items():
+                        if res_list:
+                            labels_joined = ", ".join(list(set(res_list)))
+                            html_breakdown_items += f"<li><b>{cat_name}:</b> {labels_joined}</li>"
+                    html_breakdown_items += "</ul>"
 
-1. TARGET RECEPTOR MACROMOLECULE PROFILE
--------------------------------------------------------
-- Target Configuration Identifier: {st.session_state.pdb_id_display}
-- Primary Structure Data Source: RCSB Protein Data Bank Server
+                # Generate the full HTML Document
+                html_report_document = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>InSilico BioSphere Docking Report</title>
+    <style>
+        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; max-width: 800px; margin: 0 auto; padding: 30px; background-color: #fcfcfc; }}
+        .header {{ text-align: center; margin-bottom: 40px; padding-bottom: 20px; border-bottom: 3px solid #1b5e20; }}
+        h1 {{ color: #1b5e20; margin-bottom: 5px; font-size: 2.2em; }}
+        .subtitle {{ font-size: 1.2em; font-weight: 600; color: #555; }}
+        h2 {{ color: #2e7d32; margin-top: 25px; font-size: 1.3em; border-bottom: 1px dashed #ccc; padding-bottom: 5px; }}
+        .section {{ background: #ffffff; padding: 20px; border-radius: 8px; margin-bottom: 20px; border-left: 6px solid #2e7d32; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }}
+        p {{ margin: 8px 0; }}
+        ul {{ margin-top: 5px; margin-bottom: 15px; padding-left: 20px; }}
+        li {{ margin-bottom: 5px; }}
+        .footer {{ margin-top: 50px; font-size: 0.9em; color: #777; border-top: 1px solid #ddd; padding-top: 20px; text-align: center; }}
+        .highlight {{ color: #1b5e20; font-weight: bold; font-size: 1.1em; }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🔬 InSilico BioSphere Docking Report</h1>
+        <div class="subtitle">Department of Chemistry, Shivaji Science College, Nagpur, India</div>
+    </div>
+    
+    <div class="section">
+        <h2>1. Target Receptor Macromolecule Profile</h2>
+        <p><b>Target Configuration Identifier:</b> {st.session_state.pdb_id_display}</p>
+        <p><b>Primary Structure Data Source:</b> RCSB Protein Data Bank Server / Local Upload</p>
+    </div>
 
-2. SMALL MOLECULE DRUG LIGAND PROFILE
--------------------------------------------------------
-- Input Structural Identity Matrix: {st.session_state.get('smiles_cache', 'Uploaded File Data Track')}
-- Compiled Chemical Attributes: {st.session_state.ligand_summary_text.replace('**','')}
+    <div class="section">
+        <h2>2. Small Molecule Drug Ligand Profile</h2>
+        <p><b>Input Structural Identity Matrix:</b> {st.session_state.get('smiles_cache', 'Uploaded File Data Track')}</p>
+        <p><b>Compiled Chemical Attributes:</b> {st.session_state.ligand_summary_text.replace('**','')}</p>
+    </div>
 
-3. BOUND SPACE CONFIGURATION MECHANICS (GRID BOX)
--------------------------------------------------------
-- Center Coordinates Vector (X, Y, Z): ({grid_cx}, {grid_cy}, {grid_cz})
-- Grid Bounding Dimensions (X, Y, Z): ({grid_sx} Å, {grid_sy} Å, {grid_sz} Å)
-- Search Algorithm Exhaustiveness Index: {exhaustiveness}
+    <div class="section">
+        <h2>3. Bound Space Configuration Mechanics (Grid Box)</h2>
+        <p><b>Center Coordinates Vector (X, Y, Z):</b> ({grid_cx}, {grid_cy}, {grid_cz})</p>
+        <p><b>Grid Bounding Dimensions (X, Y, Z):</b> ({grid_sx} Å, {grid_sy} Å, {grid_sz} Å)</p>
+        <p><b>Search Algorithm Exhaustiveness Index:</b> {exhaustiveness}</p>
+    </div>
 
-4. ACTIVE POSE COMPLEX BINDING METRICS (SELECTED MODE)
--------------------------------------------------------
-- Target Alignment Selection Mode: Mode {selected_pose} Pose Fit
-- Computed Gibbs Free Energy Affinity: {pose_affinity_score} kcal/mol
-- Measured Total Spatial Proximity Contact Atoms: {len(active_interactions)}
+    <div class="section">
+        <h2>4. Active Pose Complex Binding Metrics</h2>
+        <p><b>Target Alignment Selection Mode:</b> Mode {selected_pose} Pose Fit</p>
+        <p><b>Computed Gibbs Free Energy Affinity:</b> <span class="highlight">{pose_affinity_score} kcal/mol</span></p>
+        <p><b>Measured Total Spatial Proximity Contact Atoms:</b> {len(active_interactions)}</p>
+    </div>
 
-5. POCKET CONTACT RESIDUES PROACTIVE BREAKDOWN
--------------------------------------------------------
-{report_breakdown_text}
-=======================================================
-Report compiled successfully. Ready for manuscript citation.
-**InSilico BioSphere: An Integrated Platform for Automated Molecular Docking.**
-    Developed by Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, 
-    Shivaji Science College, Nagpur, India.
-=======================================================
+    <div class="section">
+        <h2>5. Pocket Contact Residues Proactive Breakdown</h2>
+        {html_breakdown_items}
+    </div>
+
+    <div class="footer">
+        <p>Report compiled successfully. Ready for manuscript citation.</p>
+        <p><b>InSilico BioSphere: An Integrated Platform for Automated Molecular Docking.</b><br>
+        Developed by Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry,<br>
+        Shivaji Science College, Nagpur, India.</p>
+    </div>
+</body>
+</html>
 """
-                st.text_area("Copy Code Summary Report Log Sheet Block directly:", value=report_content, height=320)
+                
+                # Show an interactive preview inside an expander
+                with st.expander("👁️ View Live HTML Report Preview", expanded=False):
+                    components.html(html_report_document, height=500, scrolling=True)
+                
+                # Provide a 1-click Download button for the generated HTML file
+                st.download_button(
+                    label="💾 Download Formatted HTML Report",
+                    data=html_report_document,
+                    file_name=f"InSilico_Docking_Report_Pose_{selected_pose}.html",
+                    mime="text/html",
+                    use_container_width=True
+                )
                 
                 st.subheader("🧬 Local Contact Residues & Bond Assignments Matrix")
                 if active_interactions:
@@ -740,6 +792,7 @@ if run_btn and can_dock:
             
     except Exception as e:
         st.error(f"Execution pipeline failed: {e}")
+        
 # --- GLOBAL DATAFRAME ANALYTICS DISPLAY ZONE ---
 if st.session_state.docking_results_raw is not None:
     st.write("---")
