@@ -133,7 +133,6 @@ def compute_protein_centroid(pdbqt_file):
     
     arr = np.array(coords)
     center = np.mean(arr, axis=0)
-    # Calculate bounding box dimensions + buffer for the search space
     dims = np.max(arr, axis=0) - np.min(arr, axis=0) + 10.0 
     return center[0], center[1], center[2], dims[0], dims[1], dims[2]
 
@@ -272,6 +271,24 @@ def split_docking_poses(poses_file_path):
                 current_mode = None
             else: current_lines.append(line)
     return poses
+
+def parse_vina_output_with_residues(stdout_text):
+    data = []
+    pattern = re.compile(r"^\s*(\d+)\s+([-+]?\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)")
+    poses_dict = split_docking_poses("docking_poses.pdbqt")
+    if not stdout_text: return pd.DataFrame(data)
+    for line in stdout_text.split("\n"):
+        match = pattern.match(line)
+        if match:
+            mode_idx = int(match.group(1))
+            res_string, bond_types = "N/A", "N/A"
+            if mode_idx in poses_dict:
+                ints = compute_spatial_interactions("protein.pdbqt", poses_dict[mode_idx])
+                if ints:
+                    res_string = ", ".join(list(set([i["Residue Contact"] for i in ints])))
+                    bond_types = ", ".join(list(set([i["Interaction Type"] for i in ints])))
+            data.append({"Binding Mode": mode_idx, "Affinity (kcal/mol)": float(match.group(2)), "RMSD l.b.": float(match.group(3)), "RMSD u.b.": float(match.group(4)), "Interacting Residues": res_string, "Contact Bond Types": bond_types})
+    return pd.DataFrame(data)
 
 
 # --- HIGH PERFORMANCE VISUALIZATION CONSTRUCTS ---
@@ -579,14 +596,15 @@ with col_visual:
                     else: amino_acid_categories["Hydrophobic"].append(res_full)
                 
                 breakdown_html = ""
-                has_contacts = False
+                report_breakdown_text = ""
                 for cat_name, res_list in amino_acid_categories.items():
                     if res_list:
-                        has_contacts = True
                         labels_joined = ", ".join(list(set(res_list)))
                         breakdown_html += f"<p style='margin:4px 0; font-size:13px;'><b>{cat_name}:</b> <span style='color:#333;'>{labels_joined}</span></p>"
-                if not has_contacts: 
+                        report_breakdown_text += f"- {cat_name}: {labels_joined}\n"
+                if not breakdown_html: 
                     breakdown_html = "<p style='margin:4px 0; color:#777; font-size:13px;'>No pocket interactions detected.</p>"
+                    report_breakdown_text = "- No close contacts detected under 3.8 Angstroms.\n"
 
                 html_metric_card = """
                 <div style="background-color:#f0f7f4; border-left:6px solid #2e7d32; padding:16px; border-radius:8px; margin-bottom:15px; font-family:sans-serif;">
@@ -616,41 +634,97 @@ with col_visual:
                     
                 render_advanced_modeling_blueprint(receptor_data=protein_data, ligand_data=parsed_poses[selected_pose], mode=style_mode, show_surface=surf_toggle, interactions_list=active_interactions)
                 
-                # --- AUTOMATED COMPREHENSIVE HTML REPORT EXPORT ---
+                # --- AUTOMATED COMPREHENSIVE ORIGINAL TEXT REPORT (RESTORED) ---
                 st.write("---")
-                st.subheader("📋 Comprehensive HTML Screening Report")
+                st.subheader("📋 Quick Copy-Paste Citation Report")
                 
-                # Prepare HTML bullet points for contacts
-                html_breakdown_items = ""
-                if not has_contacts:
-                    html_breakdown_items = "<ul><li>No close contacts detected under 3.8 Angstroms.</li></ul>"
-                else:
-                    html_breakdown_items = "<ul>"
-                    for cat_name, res_list in amino_acid_categories.items():
-                        if res_list:
-                            labels_joined = ", ".join(list(set(res_list)))
-                            html_breakdown_items += f"<li><b>{cat_name}:</b> {labels_joined}</li>"
-                    html_breakdown_items += "</ul>"
+                report_content = f"""=======================================================
+MOLECULAR DOCKING SCREENING ANALYSIS REPORT
+Generated dynamically via InSilico BioSphere Docking Tool
+Developed by: Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, Shivaji Science College, Nagpur, India | Contact: sarangresearch@gmail.com
+=======================================================
 
-                # Generate the full HTML Document
-                html_report_document = f"""<!DOCTYPE html>
+1. TARGET RECEPTOR MACROMOLECULE PROFILE
+-------------------------------------------------------
+- Target Configuration Identifier: {st.session_state.pdb_id_display}
+- Primary Structure Data Source: RCSB Protein Data Bank Server
+
+2. SMALL MOLECULE DRUG LIGAND PROFILE
+-------------------------------------------------------
+- Input Structural Identity Matrix: {st.session_state.get('smiles_cache', 'Uploaded File Data Track')}
+- Compiled Chemical Attributes: {st.session_state.ligand_summary_text.replace('**','')}
+
+3. BOUND SPACE CONFIGURATION MECHANICS (GRID BOX)
+-------------------------------------------------------
+- Center Coordinates Vector (X, Y, Z): ({grid_cx}, {grid_cy}, {grid_cz})
+- Grid Bounding Dimensions (X, Y, Z): ({grid_sx} Å, {grid_sy} Å, {grid_sz} Å)
+- Search Algorithm Exhaustiveness Index: {exhaustiveness}
+
+4. ACTIVE POSE COMPLEX BINDING METRICS (SELECTED MODE)
+-------------------------------------------------------
+- Target Alignment Selection Mode: Mode {selected_pose} Pose Fit
+- Computed Gibbs Free Energy Affinity: {pose_affinity_score} kcal/mol
+- Measured Total Spatial Proximity Contact Atoms: {len(active_interactions)}
+
+5. POCKET CONTACT RESIDUES PROACTIVE BREAKDOWN
+-------------------------------------------------------
+{report_breakdown_text}
+=======================================================
+Report compiled successfully. Ready for manuscript citation.
+**InSilico BioSphere: An Integrated Platform for Automated Molecular Docking.**
+    Developed by Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, 
+    Shivaji Science College, Nagpur, India.
+=======================================================
+"""
+                st.text_area("Copy Code Summary Report Log Sheet Block directly:", value=report_content, height=250)
+                
+                # --- NEW PROFESSIONAL HTML REPORT GENERATOR ---
+                st.write("---")
+                st.subheader("📄 Generate Professional HTML Report")
+                
+                # 1. Gather Bound Ligands for HTML Table
+                bound_table_html = "<p>No native co-crystallized ligands detected.</p>"
+                if st.session_state.local_target_path:
+                    b_ligs = parse_bound_ligands(st.session_state.local_target_path)
+                    if b_ligs:
+                        df_b = pd.DataFrame(b_ligs)
+                        bound_table_html = df_b[["ID", "Chain", "ResSeq", "Atoms"]].to_html(index=False, classes="data-table")
+
+                # 2. Gather Docking Results for HTML Table
+                df_results_all = parse_vina_output_with_residues(st.session_state.docking_results_raw)
+                docking_table_html = df_results_all.to_html(index=False, classes="data-table")
+                
+                # 3. Create Interaction Javascript for Offline HTML 3D Viewer
+                int_lines_js_offline = ""
+                for interact in active_interactions:
+                    rc = interact["r_coord"]
+                    lc = interact["l_coord"]
+                    color = "yellow" if "Hydrogen" in interact["Interaction Type"] else "cyan"
+                    int_lines_js_offline += f"""
+                    viewer.addCylinder({{start:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, end:{{x:{lc[0]}, y:{lc[1]}, z:{lc[2]}}}, radius:0.07, color:'{color}', dashed:true}});
+                    viewer.addLabel("{interact['Residue Contact']}", {{position:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, backgroundColor:'white', fontColor:'black', backgroundOpacity:0.8, fontSize:10}});
+                    """
+                
+                # 4. Construct the Full Offline HTML String
+                html_export_doc = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>InSilico BioSphere Docking Report</title>
     <style>
-        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; max-width: 800px; margin: 0 auto; padding: 30px; background-color: #fcfcfc; }}
+        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; max-width: 900px; margin: 0 auto; padding: 30px; background-color: #fcfcfc; }}
         .header {{ text-align: center; margin-bottom: 40px; padding-bottom: 20px; border-bottom: 3px solid #1b5e20; }}
         h1 {{ color: #1b5e20; margin-bottom: 5px; font-size: 2.2em; }}
         .subtitle {{ font-size: 1.2em; font-weight: 600; color: #555; }}
         h2 {{ color: #2e7d32; margin-top: 25px; font-size: 1.3em; border-bottom: 1px dashed #ccc; padding-bottom: 5px; }}
         .section {{ background: #ffffff; padding: 20px; border-radius: 8px; margin-bottom: 20px; border-left: 6px solid #2e7d32; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }}
         p {{ margin: 8px 0; }}
-        ul {{ margin-top: 5px; margin-bottom: 15px; padding-left: 20px; }}
-        li {{ margin-bottom: 5px; }}
+        .data-table {{ width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 0.9em; }}
+        .data-table th, .data-table td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+        .data-table th {{ background-color: #f2f2f2; color: #333; }}
         .footer {{ margin-top: 50px; font-size: 0.9em; color: #777; border-top: 1px solid #ddd; padding-top: 20px; text-align: center; }}
-        .highlight {{ color: #1b5e20; font-weight: bold; font-size: 1.1em; }}
+        #viewer_container {{ height: 500px; width: 100%; position: relative; border-radius:8px; border:1px solid #ccc; background:#fff; margin-top:15px; }}
     </style>
 </head>
 <body>
@@ -660,34 +734,48 @@ with col_visual:
     </div>
     
     <div class="section">
-        <h2>1. Target Receptor Macromolecule Profile</h2>
-        <p><b>Target Configuration Identifier:</b> {st.session_state.pdb_id_display}</p>
-        <p><b>Primary Structure Data Source:</b> RCSB Protein Data Bank Server / Local Upload</p>
+        <h2>1. Target Receptor Profile</h2>
+        <p><b>Target Identifier:</b> {st.session_state.pdb_id_display}</p>
+        <p><b>Data Source:</b> RCSB Protein Data Bank / Local Upload</p>
+        <h3>Bound Small Molecules in Receptor</h3>
+        {bound_table_html}
     </div>
 
     <div class="section">
-        <h2>2. Small Molecule Drug Ligand Profile</h2>
-        <p><b>Input Structural Identity Matrix:</b> {st.session_state.get('smiles_cache', 'Uploaded File Data Track')}</p>
-        <p><b>Compiled Chemical Attributes:</b> {st.session_state.ligand_summary_text.replace('**','')}</p>
+        <h2>2. Small Molecule Ligand Profile</h2>
+        <p><b>Structural Matrix:</b> {st.session_state.get('smiles_cache', 'Uploaded File')}</p>
+        <p><b>Chemical Attributes:</b> {st.session_state.ligand_summary_text.replace('**','')}</p>
     </div>
 
     <div class="section">
-        <h2>3. Bound Space Configuration Mechanics (Grid Box)</h2>
-        <p><b>Center Coordinates Vector (X, Y, Z):</b> ({grid_cx}, {grid_cy}, {grid_cz})</p>
-        <p><b>Grid Bounding Dimensions (X, Y, Z):</b> ({grid_sx} Å, {grid_sy} Å, {grid_sz} Å)</p>
-        <p><b>Search Algorithm Exhaustiveness Index:</b> {exhaustiveness}</p>
+        <h2>3. Grid Box Mechanics</h2>
+        <p><b>Center (X, Y, Z):</b> ({grid_cx}, {grid_cy}, {grid_cz})</p>
+        <p><b>Dimensions (X, Y, Z):</b> ({grid_sx} Å, {grid_sy} Å, {grid_sz} Å)</p>
+        <p><b>Exhaustiveness:</b> {exhaustiveness}</p>
     </div>
 
     <div class="section">
-        <h2>4. Active Pose Complex Binding Metrics</h2>
-        <p><b>Target Alignment Selection Mode:</b> Mode {selected_pose} Pose Fit</p>
-        <p><b>Computed Gibbs Free Energy Affinity:</b> <span class="highlight">{pose_affinity_score} kcal/mol</span></p>
-        <p><b>Measured Total Spatial Proximity Contact Atoms:</b> {len(active_interactions)}</p>
+        <h2>4. Overall Docking Results</h2>
+        {docking_table_html}
     </div>
 
     <div class="section">
-        <h2>5. Pocket Contact Residues Proactive Breakdown</h2>
-        {html_breakdown_items}
+        <h2>5. Selected Pose Analysis (Mode {selected_pose})</h2>
+        <p><b>Affinity:</b> {pose_affinity_score} kcal/mol</p>
+        <p><b>Total Proximity Contacts:</b> {len(active_interactions)}</p>
+        <h3>Interactive 3D Protein-Ligand View</h3>
+        <p style="font-size:0.85em; color:#666;">(Use mouse to rotate, scroll to zoom. Cyan lines = van der Waals / pi-Stacking. Yellow lines = Hydrogen Bonds)</p>
+        <div id="viewer_container"></div>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.0.4/3Dmol-min.js"></script>
+        <script>
+            let viewer = $3Dmol.createViewer(document.getElementById('viewer_container'), {{backgroundColor: '#ffffff'}});
+            viewer.addModel(`{protein_data}`, 'pdb');
+            viewer.setStyle({{model: 0}}, {{{style_mode}: {{colorscheme: 'chain', style: 'oval', thickness: 0.6}}}});
+            viewer.addModel(`{parsed_poses[selected_pose]}`, 'pdb');
+            viewer.setStyle({{model: 1}}, {{stick: {{colorscheme: 'greenCarbon', radius: 0.28}}}});
+            {int_lines_js_offline}
+            viewer.zoomTo(); viewer.render();
+        </script>
     </div>
 
     <div class="footer">
@@ -697,22 +785,17 @@ with col_visual:
         Shivaji Science College, Nagpur, India.</p>
     </div>
 </body>
-</html>
-"""
-                
-                # Show an interactive preview inside an expander
-                with st.expander("👁️ View Live HTML Report Preview", expanded=False):
-                    components.html(html_report_document, height=500, scrolling=True)
-                
-                # Provide a 1-click Download button for the generated HTML file
+</html>"""
+
                 st.download_button(
-                    label="💾 Download Formatted HTML Report",
-                    data=html_report_document,
-                    file_name=f"InSilico_Docking_Report_Pose_{selected_pose}.html",
+                    label="🔥 Download Full Interactive HTML Report",
+                    data=html_export_doc,
+                    file_name=f"InSilico_Docking_Report_{st.session_state.pdb_id_display}_Mode{selected_pose}.html",
                     mime="text/html",
-                    use_container_width=True
+                    use_container_width=True,
+                    type="primary"
                 )
-                
+
                 st.subheader("🧬 Local Contact Residues & Bond Assignments Matrix")
                 if active_interactions:
                     df_int = pd.DataFrame(active_interactions)
@@ -798,10 +881,11 @@ if st.session_state.docking_results_raw is not None:
     st.write("---")
     st.header("📊 Screening Metrics Dashboard & Data Export")
     
-    def parse_vina_output_with_residues(stdout_text):
+    def parse_vina_output_with_residues_global(stdout_text):
         data = []
         pattern = re.compile(r"^\s*(\d+)\s+([-+]?\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)")
         poses_dict = split_docking_poses("docking_poses.pdbqt")
+        if not stdout_text: return pd.DataFrame(data)
         for line in stdout_text.split("\n"):
             match = pattern.match(line)
             if match:
@@ -815,10 +899,10 @@ if st.session_state.docking_results_raw is not None:
                 data.append({"Binding Mode": mode_idx, "Affinity (kcal/mol)": float(match.group(2)), "RMSD l.b.": float(match.group(3)), "RMSD u.b.": float(match.group(4)), "Interacting Residues": res_string, "Contact Bond Types": bond_types})
         return pd.DataFrame(data)
 
-    df_results = parse_vina_output_with_residues(st.session_state.docking_results_raw)
-    if not df_results.empty:
+    df_results_global = parse_vina_output_with_residues_global(st.session_state.docking_results_raw)
+    if not df_results_global.empty:
         col_table, col_export = st.columns([2, 1])
-        with col_table: st.dataframe(df_results, hide_index=True, use_container_width=True)
+        with col_table: st.dataframe(df_results_global, hide_index=True, use_container_width=True)
         with col_export:
-            csv_data = df_results.to_csv(index=False).encode('utf-8')
+            csv_data = df_results_global.to_csv(index=False).encode('utf-8')
             st.download_button(label="📥 Download Data Sheet (.CSV)", data=csv_data, file_name="screening_affinity_report.csv", mime="text/csv", use_container_width=True)
