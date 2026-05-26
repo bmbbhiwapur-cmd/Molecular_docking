@@ -361,6 +361,7 @@ st.title("🔬 InSilico BioSphere - Docking + ADME + Redesign")
 st.markdown("""
 **InSilico BioSphere** | Developed by: Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, Shivaji Science College, Nagpur, India | Contact: sarangresearch@gmail.com
 """)
+
 # Initialize states safely
 if "cx" not in st.session_state: st.session_state.cx = 0.0
 if "cy" not in st.session_state: st.session_state.cy = 0.0
@@ -376,6 +377,7 @@ if "docking_results_raw" not in st.session_state: st.session_state.docking_resul
 if "serialized_ligand_block" not in st.session_state: st.session_state.serialized_ligand_block = None
 if "ligand_summary_text" not in st.session_state: st.session_state.ligand_summary_text = ""
 if "smiles_cache" not in st.session_state: st.session_state.smiles_cache = ""
+if "selected_native_ligand" not in st.session_state: st.session_state.selected_native_ligand = "None (Manual / Blind Docking)"
 
 # --- MASTER ENVIRONMENT RESET ACTIONS ---
 if st.button("🔄 Reset Entire Environment for Fresh Docking", type="secondary", use_container_width=True):
@@ -522,6 +524,7 @@ with col_params:
                 chosen_target = bound_ligands_list[selected_lig_id]
                 st.session_state.cx, st.session_state.cy, st.session_state.cz = chosen_target["cx"], chosen_target["cy"], chosen_target["cz"]
                 st.session_state.sx, st.session_state.sy, st.session_state.sz = chosen_target["bx"], chosen_target["by"], chosen_target["bz"]
+                st.session_state.selected_native_ligand = f"{chosen_target['ID']} (Chain {chosen_target['Chain']}-ResSeq {chosen_target['ResSeq']})"
                 st.success("Grid parameters aligned over pocket boundaries!")
                 st.rerun()
 
@@ -533,6 +536,7 @@ with col_params:
             cx, cy, cz, sx, sy, sz = compute_protein_centroid("protein.pdbqt")
             st.session_state.cx, st.session_state.cy, st.session_state.cz = cx, cy, cz
             st.session_state.sx, st.session_state.sy, st.session_state.sz = sx, sy, sz
+            st.session_state.selected_native_ligand = "Blind Docking Enabled (Entire Surface Area)"
             st.success("Grid box dynamically expanded to cover the entire macromolecule!")
             st.rerun()
         else:
@@ -661,6 +665,7 @@ Developed by: Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry,
 - Center Coordinates Vector (X, Y, Z): ({grid_cx}, {grid_cy}, {grid_cz})
 - Grid Bounding Dimensions (X, Y, Z): ({grid_sx} Å, {grid_sy} Å, {grid_sz} Å)
 - Search Algorithm Exhaustiveness Index: {exhaustiveness}
+- Grid Alignment Target: {st.session_state.selected_native_ligand}
 
 4. ACTIVE POSE COMPLEX BINDING METRICS (SELECTED MODE)
 -------------------------------------------------------
@@ -684,19 +689,31 @@ Report compiled successfully. Ready for manuscript citation.
                 st.write("---")
                 st.subheader("📄 Generate Professional HTML Report")
                 
-                # 1. Gather Bound Ligands for HTML Table
+                # 1. Gather Protein Metadata for HTML Target Profile
+                meta_html = "<p>Data mapping temporarily unavailable.</p>"
+                if st.session_state.local_target_path:
+                    meta = extract_pdb_metadata(st.session_state.local_target_path, st.session_state.pdb_id_display)
+                    meta_html = f"""
+                    <p><b>Title:</b> {meta['title']}</p>
+                    <p><b>Classification:</b> {meta['class']} | <b>Organism(s):</b> {meta['organism']} | <b>Expression System:</b> {meta['system']}</p>
+                    <p><b>Experimental Method:</b> {meta['method']} | <b>Resolution:</b> {meta['res']}</p>
+                    """
+                
+                # 2. Gather Bound Ligands for HTML Table (with Center and Box Columns)
                 bound_table_html = "<p>No native co-crystallized ligands detected.</p>"
                 if st.session_state.local_target_path:
                     b_ligs = parse_bound_ligands(st.session_state.local_target_path)
                     if b_ligs:
                         df_b = pd.DataFrame(b_ligs)
-                        bound_table_html = df_b[["ID", "Chain", "ResSeq", "Atoms"]].to_html(index=False, classes="data-table")
+                        df_b["Center (X, Y, Z) Å"] = df_b.apply(lambda r: f"{r['cx']}, {r['cy']}, {r['cz']}", axis=1)
+                        df_b["Box (X, Y, Z) Å"] = df_b.apply(lambda r: f"{r['bx']}, {r['by']}, {r['bz']}", axis=1)
+                        bound_table_html = df_b[["ID", "Chain", "ResSeq", "Atoms", "Center (X, Y, Z) Å", "Box (X, Y, Z) Å"]].to_html(index=False, classes="data-table")
 
-                # 2. Gather Docking Results for HTML Table
+                # 3. Gather Docking Results for HTML Table
                 df_results_all = parse_vina_output_with_residues(st.session_state.docking_results_raw)
                 docking_table_html = df_results_all.to_html(index=False, classes="data-table")
                 
-                # 3. Create Interaction Javascript for Offline HTML 3D Viewer
+                # 4. Generate Interaction Javascript for Offline HTML 3D Viewer
                 int_lines_js_offline = ""
                 for interact in active_interactions:
                     rc = interact["r_coord"]
@@ -706,8 +723,19 @@ Report compiled successfully. Ready for manuscript citation.
                     viewer.addCylinder({{start:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, end:{{x:{lc[0]}, y:{lc[1]}, z:{lc[2]}}}, radius:0.07, color:'{color}', dashed:true}});
                     viewer.addLabel("{interact['Residue Contact']}", {{position:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, backgroundColor:'white', fontColor:'black', backgroundOpacity:0.8, fontSize:10}});
                     """
+                
+                # Create exact JS styling logic corresponding to the UI Radio Button
+                protein_style_js = ""
+                if style_mode == 'cartoon':
+                    protein_style_js = "viewer.setStyle({model: 0}, {cartoon: {colorscheme: 'chain', style: 'oval', thickness: 0.6}});"
+                elif style_mode == 'spacefill':
+                    protein_style_js = "viewer.setStyle({model: 0}, {sphere: {colorscheme: 'chain', radius:1.1}});"
+                else: # sticks
+                    protein_style_js = "viewer.setStyle({model: 0}, {stick: {colorscheme: 'chain', radius:0.25}});"
                     
-                # 4. Generate HTML for the Selected Pose Amino Acid Breakdown
+                surface_js_offline = "viewer.addSurface($3Dmol.SurfaceType.VDW, {opacity:0.45, colorscheme:{prop:'b',gradient:'rwb'}}, {model:0});" if surf_toggle else ""
+                    
+                # 5. Generate HTML for the Selected Pose Amino Acid Breakdown
                 html_breakdown_items = ""
                 if not has_contacts:
                     html_breakdown_items = "<ul><li>No close contacts detected under 3.8 Angstroms.</li></ul>"
@@ -719,13 +747,13 @@ Report compiled successfully. Ready for manuscript citation.
                             html_breakdown_items += f"<li><b>{cat_name}:</b> {labels_joined}</li>"
                     html_breakdown_items += "</ul>"
                     
-                # 5. Generate HTML for the Interaction Matrix Table
+                # 6. Generate HTML for the Interaction Matrix Table
                 int_matrix_html = "<p>No close contacts detected under 3.8 Angstroms.</p>"
                 if active_interactions:
                     df_int_html = pd.DataFrame(active_interactions)
                     int_matrix_html = df_int_html[["Residue Contact", "Interaction Type", "Distance (Å)"]].to_html(index=False, classes="data-table")
                 
-                # 6. Construct the Full Offline HTML String
+                # 7. Construct the Full Offline HTML String
                 html_export_doc = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -757,6 +785,7 @@ Report compiled successfully. Ready for manuscript citation.
         <h2>1. Target Receptor Profile</h2>
         <p><b>Target Identifier:</b> {st.session_state.pdb_id_display}</p>
         <p><b>Data Source:</b> RCSB Protein Data Bank / Local Upload</p>
+        {meta_html}
         <h3>Bound Small Molecules in Receptor</h3>
         {bound_table_html}
     </div>
@@ -772,6 +801,7 @@ Report compiled successfully. Ready for manuscript citation.
         <p><b>Center (X, Y, Z):</b> ({grid_cx}, {grid_cy}, {grid_cz})</p>
         <p><b>Dimensions (X, Y, Z):</b> ({grid_sx} Å, {grid_sy} Å, {grid_sz} Å)</p>
         <p><b>Exhaustiveness:</b> {exhaustiveness}</p>
+        <p><b>Grid Alignment Target:</b> {st.session_state.selected_native_ligand}</p>
     </div>
 
     <div class="section">
@@ -794,7 +824,8 @@ Report compiled successfully. Ready for manuscript citation.
         <script>
             let viewer = $3Dmol.createViewer(document.getElementById('viewer_container'), {{backgroundColor: '#ffffff'}});
             viewer.addModel(`{protein_data}`, 'pdb');
-            viewer.setStyle({{model: 0}}, {{{style_mode}: {{colorscheme: 'chain', style: 'oval', thickness: 0.6}}}});
+            {protein_style_js}
+            {surface_js_offline}
             viewer.addModel(`{parsed_poses[selected_pose]}`, 'pdb');
             viewer.setStyle({{model: 1}}, {{stick: {{colorscheme: 'greenCarbon', radius: 0.28}}}});
             {int_lines_js_offline}
