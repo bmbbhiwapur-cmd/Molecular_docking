@@ -2,6 +2,7 @@ import time
 import streamlit as st
 import subprocess
 import os
+import shutil
 import urllib.request
 import json
 import re
@@ -93,7 +94,6 @@ def extract_pdb_metadata(file_path, pdb_id="Custom"):
 
 
 def discover_and_list_all_heteroatoms(file_path):
-    """Scans the protein framework file to discover all non-water heteroatoms/ions present."""
     hetero_counts = {}
     if not os.path.exists(file_path): return hetero_counts
     
@@ -179,7 +179,7 @@ def identify_protein_cavities(pdbqt_file, max_pockets=5):
                 score = np.sum((dists > 3.0) & (dists < 12.0))
                 core_clash = np.sum(dists <= 3.0)
                 
-                # A good pocket is surrounded by atoms (score) but not inside solid protein (core_clash)
+                # A good pocket is surrounded by atoms but not inside solid protein
                 if core_clash < 20 and score > 20:
                     pockets.append({
                         "Pocket_ID": f"Cavity {idx}",
@@ -190,7 +190,6 @@ def identify_protein_cavities(pdbqt_file, max_pockets=5):
                     
     pockets = sorted(pockets, key=lambda x: x["Score"], reverse=True)
     
-    # Deduplicate overlapping pockets
     final_pockets = []
     for p in pockets:
         if not final_pockets:
@@ -205,7 +204,7 @@ def identify_protein_cavities(pdbqt_file, max_pockets=5):
                 final_pockets.append(p)
         if len(final_pockets) >= max_pockets: break
             
-    # Guaranteed Fallback: If absolutely no cavities found, map the central core so feature never breaks
+    # Guaranteed Fallback: If no cavities found, map the central core so feature never breaks
     if not final_pockets:
         center = np.mean(arr, axis=0)
         dims = max_bound - min_bound
@@ -256,7 +255,6 @@ def parse_pdbqt_coordinates(pdbqt_string):
             except ValueError: continue
     return atoms
 
-
 def compute_spatial_interactions(receptor_file, ligand_pdbqt_str):
     interactions = []
     if not os.path.exists(receptor_file): return interactions
@@ -305,8 +303,8 @@ def fetch_pdb_from_rcsb(pdb_id):
 
 
 def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=False, allowed_heteroatoms=None):
-    if allowed_heteroatoms is None:
-        allowed_heteroatoms = []
+    """Safely converts PDB to PDBQT using a temporary buffer to avoid file truncation crashes."""
+    if allowed_heteroatoms is None: allowed_heteroatoms = []
         
     autodock_type_map = {
         "H": "H", "HD": "HD", "HS": "HS", "C": "C", "A": "A", "N": "N", "NA": "NA", 
@@ -319,9 +317,11 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=Fals
             mol = Chem.MolFromPDBFile(input_pdb, removeHs=False)
             if mol: torsions = AllChem.CalcNumRotatableBonds(mol)
         except Exception: torsions = 4
+        
+    temp_out = f"temp_safe_write_{output_pdbqt}"
     try:
         atom_count = 0
-        with open(input_pdb, "r") as pdb, open(output_pdbqt, "w") as pdbqt:
+        with open(input_pdb, "r") as pdb, open(temp_out, "w") as pdbqt:
             if is_ligand: pdbqt.write("ROOT\n")
             for line in pdb:
                 if line.startswith("ATOM") or (line.startswith("HETATM") and not is_ligand) or (line.startswith("HETATM") and is_ligand):
@@ -352,8 +352,13 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=Fals
                 pdbqt.write("ENDROOT\n")
                 pdbqt.write(f"TORSDOF {torsions}\n")
             else: pdbqt.write("ENDMDL\n")
+            
+        # Overwrite safely only when the full parsing completes successfully
+        shutil.move(temp_out, output_pdbqt)
         return atom_count > 0, output_pdbqt
-    except Exception as e: return False, str(e)
+    except Exception as e:
+        if os.path.exists(temp_out): os.remove(temp_out)
+        return False, str(e)
 
 
 def convert_smiles_to_pdbqt(smiles_string, output_filename="ligand.pdbqt"):
@@ -373,10 +378,8 @@ def convert_smiles_to_pdbqt(smiles_string, output_filename="ligand.pdbqt"):
 
 # --- NATIVE UFF ENERGY MINIMIZATION ENGINE (WITH PROGRESS BAR) ---
 
-def execute_uff_complex_minimization(protein_path, ligand_pose_str):
-    """
-    Executes Force Field relaxation in chunks to allow Streamlit UI Progress Updates.
-    """
+def execute_uff_complex_minimization(protein_path, ligand_pose_str, progress_ui=None):
+    """Executes Force Field relaxation in chunks to update the Streamlit UI Progress Bar."""
     try:
         protein_mol = Chem.MolFromPDBFile(protein_path, sanitize=False, removeHs=False)
         ligand_mol = Chem.MolFromPDBBlock(ligand_pose_str, sanitize=False, removeHs=False)
@@ -392,31 +395,31 @@ def execute_uff_complex_minimization(protein_path, ligand_pose_str):
         
         pre_energy = uff_field.CalcEnergy()
         
-        # Streamlit Progress UI Hook
         max_iter = 150
         chunk_size = 15
-        prog_bar = st.progress(0, text="⏳ Initializing UFF Force Field Physics...")
+        
+        if progress_ui:
+            prog_bar = progress_ui.progress(0, text="⏳ Initializing UFF Force Field Physics Matrix...")
         
         res = 1
         for i in range(0, max_iter, chunk_size):
             res = uff_field.Minimize(maxIts=chunk_size, forceTol=1e-3)
             pct = min(100, int(((i + chunk_size) / max_iter) * 100))
-            prog_bar.progress(pct, text=f"🧬 Relaxing Complex Sterics... ({pct}% complete)")
-            time.sleep(0.02) # Yield execution briefly for UI frame update
+            if progress_ui:
+                prog_bar.progress(pct, text=f"🧬 Relaxing Complex Sterics... ({pct}% complete)")
+            time.sleep(0.01) # Yield execution briefly for UI frame update
             
             if res == 0:
-                prog_bar.progress(100, text="✨ Steric Relaxation Converged Perfectly!")
+                if progress_ui: prog_bar.progress(100, text="✨ Steric Relaxation Converged Perfectly!")
                 break
                 
-        if res != 0:
-            prog_bar.progress(100, text="✨ Steric Relaxation Completed (Max Steps Reached).")
+        if res != 0 and progress_ui:
+            prog_bar.progress(100, text="✨ Steric Relaxation Completed (Max Optimization Steps Reached).")
             
         post_energy = uff_field.CalcEnergy()
         delta_energy = post_energy - pre_energy
         
-        time.sleep(0.5)
-        prog_bar.empty() # Clean up the bar from UI once done
-        
+        time.sleep(0.4)
         return f"{pre_energy:.2f}", f"{post_energy:.2f}", f"{delta_energy:.2f}"
     except Exception:
         return "N/A", "N/A", "N/A"
@@ -441,7 +444,6 @@ def split_docking_poses(poses_file_path):
     return poses
 
 def parse_vina_output_with_residues(stdout_text):
-    """Robust parser using .split() to ensure Mode 1 and 0 RMSD columns are captured perfectly."""
     data = []
     poses_dict = split_docking_poses("docking_poses.pdbqt")
     if not stdout_text: return pd.DataFrame(data)
@@ -463,15 +465,11 @@ def parse_vina_output_with_residues(stdout_text):
                         bond_types = ", ".join(list(set([i["Interaction Type"] for i in ints])))
                 
                 data.append({
-                    "Binding Mode": mode_idx, 
-                    "Affinity (kcal/mol)": aff, 
-                    "RMSD l.b.": rmsd_lb, 
-                    "RMSD u.b.": rmsd_ub, 
-                    "Interacting Residues": res_string, 
-                    "Contact Bond Types": bond_types
+                    "Binding Mode": mode_idx, "Affinity (kcal/mol)": aff, 
+                    "RMSD l.b.": rmsd_lb, "RMSD u.b.": rmsd_ub, 
+                    "Interacting Residues": res_string, "Contact Bond Types": bond_types
                 })
-            except ValueError:
-                continue
+            except ValueError: continue
     return pd.DataFrame(data)
 
 def build_styled_html_table(df):
@@ -485,18 +483,13 @@ def build_styled_html_table(df):
             val = row[col]
             if col == 'Affinity (kcal/mol)':
                 try:
-                    if float(val) > 0:
-                        html += f'<td style="color: #c62828; font-weight: bold;">{val}</td>'
-                    else:
-                        html += f'<td style="color: #1b5e20;">{val}</td>'
-                except:
-                    html += f'<td>{val}</td>'
-            else:
-                html += f'<td>{val}</td>'
+                    if float(val) > 0: html += f'<td style="color: #c62828; font-weight: bold;">{val}</td>'
+                    else: html += f'<td style="color: #1b5e20;">{val}</td>'
+                except: html += f'<td>{val}</td>'
+            else: html += f'<td>{val}</td>'
         html += '</tr>'
     html += '</tbody></table>'
     return html
-
 
 # --- HIGH PERFORMANCE VISUALIZATION CONSTRUCTS ---
 
@@ -591,6 +584,7 @@ if "rebuild_protein" not in st.session_state: st.session_state.rebuild_protein =
 if "active_retained_ions" not in st.session_state: st.session_state.active_retained_ions = "None"
 if "uff_cache" not in st.session_state: st.session_state.uff_cache = {}
 if "last_uploaded_protein" not in st.session_state: st.session_state.last_uploaded_protein = ""
+if "last_uploaded_ligand" not in st.session_state: st.session_state.last_uploaded_ligand = "" # Safety hook for Ligand Loop
 
 # --- MASTER ENVIRONMENT RESET ACTIONS ---
 if st.button("🔄 Reset Entire Environment for Fresh Docking", type="secondary", use_container_width=True):
@@ -636,7 +630,6 @@ with col_params:
     else:
         uploaded_file = st.file_uploader("Upload Target Protein File", type=["pdb", "pdbqt"])
         if uploaded_file:
-            # Prevent infinite reloading bug when ligand is uploaded
             if st.session_state.last_uploaded_protein != uploaded_file.name:
                 path = f"uploaded_{uploaded_file.name}"
                 with open(path, "wb") as f: f.write(uploaded_file.getbuffer())
@@ -727,63 +720,66 @@ with col_params:
                 except Exception as e: st.error(f"SMILES Parsing Failure: {e}")
             
     elif ligand_source == "Upload Structural File (.pdb, .sdf)" and uploaded_lig_buffer is not None:
-        temp_in = f"raw_ligand_{uploaded_lig_name}"
-        with open(temp_in, "wb") as f:
-            f.write(uploaded_lig_buffer.getbuffer())
-        
-        try:
-            mol = None
-            if uploaded_lig_name.lower().endswith(".pdb"):
-                mol = Chem.MolFromPDBFile(temp_in, removeHs=False)
-            elif uploaded_lig_name.lower().endswith((".sdf", ".mol")):
-                suppl = Chem.SDMolSupplier(temp_in, removeHs=False)
-                if len(suppl) > 0:
-                    mol = suppl[0]
+        # Prevent infinite reloading bug when ligand is uploaded
+        if st.session_state.last_uploaded_ligand != uploaded_lig_name:
+            temp_in = f"raw_ligand_{uploaded_lig_name}"
+            with open(temp_in, "wb") as f:
+                f.write(uploaded_lig_buffer.getbuffer())
             
-            if mol is not None:
-                try:
-                    Chem.SanitizeMol(mol)
-                    AllChem.AssignBondOrdersFromTopology(mol)
-                except Exception: pass
+            try:
+                mol = None
+                if uploaded_lig_name.lower().endswith(".pdb"):
+                    mol = Chem.MolFromPDBFile(temp_in, removeHs=False)
+                elif uploaded_lig_name.lower().endswith((".sdf", ".mol")):
+                    suppl = Chem.SDMolSupplier(temp_in, removeHs=False)
+                    if len(suppl) > 0:
+                        mol = suppl[0]
                 
-                if mol.GetNumConformers() == 0:
-                    mol = Chem.AddHs(mol)
-                    AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
-                    AllChem.MMFFOptimizeMolecule(mol)
-                
-                temp_pdb = "temp_lig_state.pdb"
-                Chem.MolToPDBFile(mol, temp_pdb)
-                ok, _ = convert_pdb_to_pdbqt(temp_pdb, "ligand.pdbqt", is_ligand=True)
-                st.session_state.ligand_ready = ok
-                
-                try:
-                    st.session_state.smiles_cache = Chem.MolToSmiles(mol)
-                except Exception:
+                if mol is not None:
+                    try:
+                        Chem.SanitizeMol(mol)
+                        AllChem.AssignBondOrdersFromTopology(mol)
+                    except Exception: pass
+                    
+                    if mol.GetNumConformers() == 0:
+                        mol = Chem.AddHs(mol)
+                        AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
+                        AllChem.MMFFOptimizeMolecule(mol)
+                    
+                    temp_pdb = "temp_lig_state.pdb"
+                    Chem.MolToPDBFile(mol, temp_pdb)
+                    ok, _ = convert_pdb_to_pdbqt(temp_pdb, "ligand.pdbqt", is_ligand=True)
+                    st.session_state.ligand_ready = ok
+                    
+                    try:
+                        st.session_state.smiles_cache = Chem.MolToSmiles(mol)
+                    except Exception:
+                        st.session_state.smiles_cache = ""
+                else:
+                    ok, _ = convert_pdb_to_pdbqt(temp_in, "ligand.pdbqt", is_ligand=True)
+                    st.session_state.ligand_ready = ok
                     st.session_state.smiles_cache = ""
-            else:
-                ok, _ = convert_pdb_to_pdbqt(temp_in, "ligand.pdbqt", is_ligand=True)
-                st.session_state.ligand_ready = ok
-                st.session_state.smiles_cache = ""
-            
-            if st.session_state.ligand_ready:
-                st.session_state.ligand_summary_text = f"**{uploaded_lig_name}** parsed and converted safely to PDBQT parameters."
-                with open("ligand.pdbqt", "r") as f:
-                    st.session_state.serialized_ligand_block = f.read()
                 
+                if st.session_state.ligand_ready:
+                    st.session_state.ligand_summary_text = f"**{uploaded_lig_name}** parsed and converted safely to PDBQT parameters."
+                    with open("ligand.pdbqt", "r") as f:
+                        st.session_state.serialized_ligand_block = f.read()
+                    
+                    if os.path.exists(temp_in): os.remove(temp_in)
+                    if 'temp_pdb' in locals() and os.path.exists(temp_pdb): os.remove(temp_pdb)
+                    
+                    st.session_state.last_uploaded_ligand = uploaded_lig_name
+                    st.success("Structural file loaded and ready for docking!")
+                    time.sleep(0.5)
+                    st.rerun()
+                else:
+                    st.error("Failed to parse ligand matrix. Ensure file framework contains valid coordinates.")
+
+            except Exception as e:
+                st.error(f"Upload processing failed: {e}")
+            finally:
                 if os.path.exists(temp_in): os.remove(temp_in)
                 if 'temp_pdb' in locals() and os.path.exists(temp_pdb): os.remove(temp_pdb)
-                
-                st.success("Structural file loaded and ready for docking!")
-                time.sleep(0.5)
-                st.rerun()
-            else:
-                st.error("Failed to parse ligand matrix. Ensure file framework contains valid coordinates.")
-
-        except Exception as e:
-            st.error(f"Upload processing failed: {e}")
-        finally:
-            if os.path.exists(temp_in): os.remove(temp_in)
-            if 'temp_pdb' in locals() and os.path.exists(temp_pdb): os.remove(temp_pdb)
 
     if st.session_state.target_ready and os.path.exists("ligand.pdbqt") and os.path.getsize("ligand.pdbqt") > 20:
         st.session_state.ligand_ready = True
@@ -901,12 +897,16 @@ with col_visual:
                 except ValueError:
                     aff_color = "#1b5e20"
 
-                # SMART CACHE: Prevents UFF from freezing the app on subsequent clicks
+                # SMART CACHE WITH DEDICATED PROGRESS UI
                 cache_key = f"uff_{st.session_state.protein_name}_{selected_pose}"
+                uff_progress_placeholder = st.empty() # Create dynamic UI slot
+                
                 if cache_key not in st.session_state.uff_cache:
-                    pre_uff, post_uff, delta_uff = execute_uff_complex_minimization("protein.pdbqt", parsed_poses[selected_pose])
+                    pre_uff, post_uff, delta_uff = execute_uff_complex_minimization("protein.pdbqt", parsed_poses[selected_pose], uff_progress_placeholder)
                     st.session_state.uff_cache[cache_key] = (pre_uff, post_uff, delta_uff)
                 
+                # Clear progress UI safely once cached data is retrieved
+                uff_progress_placeholder.empty()
                 pre_uff, post_uff, delta_uff = st.session_state.uff_cache[cache_key]
 
                 active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
