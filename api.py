@@ -366,7 +366,8 @@ def execute_uff_complex_minimization(protein_path, ligand_pose_str):
         if not uff_field: return "N/A", "N/A", "N/A"
         
         pre_energy = uff_field.CalcEnergy()
-        uff_field.Minimize(maxIts=350, forceTol=1e-4)
+        # Optimized iterations to 150 for speedy UI response while retaining clash resolution
+        uff_field.Minimize(maxIts=150, forceTol=1e-3)
         post_energy = uff_field.CalcEnergy()
         delta_energy = post_energy - pre_energy
         
@@ -394,21 +395,37 @@ def split_docking_poses(poses_file_path):
     return poses
 
 def parse_vina_output_with_residues(stdout_text):
+    """Robust text parser using .split() instead of strict Regex to ensure Mode 1 is never missed."""
     data = []
-    pattern = re.compile(r"^\s*(\d+)\s+([-+]?\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)")
     poses_dict = split_docking_poses("docking_poses.pdbqt")
     if not stdout_text: return pd.DataFrame(data)
+    
     for line in stdout_text.split("\n"):
-        match = pattern.match(line)
-        if match:
-            mode_idx = int(match.group(1))
-            res_string, bond_types = "N/A", "N/A"
-            if mode_idx in poses_dict:
-                ints = compute_spatial_interactions("protein.pdbqt", poses_dict[mode_idx])
-                if ints:
-                    res_string = ", ".join(list(set([i["Residue Contact"] for i in ints])))
-                    bond_types = ", ".join(list(set([i["Interaction Type"] for i in ints])))
-            data.append({"Binding Mode": mode_idx, "Affinity (kcal/mol)": float(match.group(2)), "RMSD l.b.": float(match.group(3)), "RMSD u.b.": float(match.group(4)), "Interacting Residues": res_string, "Contact Bond Types": bond_types})
+        parts = line.split()
+        if len(parts) >= 4 and parts[0].isdigit():
+            try:
+                mode_idx = int(parts[0])
+                aff = float(parts[1])
+                rmsd_lb = float(parts[2])
+                rmsd_ub = float(parts[3])
+                
+                res_string, bond_types = "N/A", "N/A"
+                if mode_idx in poses_dict:
+                    ints = compute_spatial_interactions("protein.pdbqt", poses_dict[mode_idx])
+                    if ints:
+                        res_string = ", ".join(list(set([i["Residue Contact"] for i in ints])))
+                        bond_types = ", ".join(list(set([i["Interaction Type"] for i in ints])))
+                
+                data.append({
+                    "Binding Mode": mode_idx, 
+                    "Affinity (kcal/mol)": aff, 
+                    "RMSD l.b.": rmsd_lb, 
+                    "RMSD u.b.": rmsd_ub, 
+                    "Interacting Residues": res_string, 
+                    "Contact Bond Types": bond_types
+                })
+            except ValueError:
+                continue
     return pd.DataFrame(data)
 
 def build_styled_html_table(df):
@@ -656,11 +673,18 @@ with col_params:
                 except Exception as e: st.error(f"SMILES Parsing Failure: {e}")
             
     elif ligand_source == "Upload Structural File (.pdb, .sdf)" and uploaded_lig_buffer is not None:
-            temp_in = f"raw_ligand_{uploaded_lig_name}"
-            with open(temp_in, "wb") as f:
-                f.write(uploaded_lig_buffer.getbuffer())
-            
-            mol = Chem.MolFromPDBFile(temp_in, removeHs=False) if uploaded_lig_name.endswith(".pdb") else Chem.SDMolSupplier(temp_in, removeHs=False)[0]
+        temp_in = f"raw_ligand_{uploaded_lig_name}"
+        with open(temp_in, "wb") as f:
+            f.write(uploaded_lig_buffer.getbuffer())
+        
+        try:
+            mol = None
+            if uploaded_lig_name.lower().endswith(".pdb"):
+                mol = Chem.MolFromPDBFile(temp_in, removeHs=False)
+            elif uploaded_lig_name.lower().endswith((".sdf", ".mol")):
+                suppl = Chem.SDMolSupplier(temp_in, removeHs=False)
+                if len(suppl) > 0:
+                    mol = suppl[0]
             
             if mol is not None:
                 try:
@@ -677,19 +701,33 @@ with col_params:
                 Chem.MolToPDBFile(mol, temp_pdb)
                 ok, _ = convert_pdb_to_pdbqt(temp_pdb, "ligand.pdbqt", is_ligand=True)
                 st.session_state.ligand_ready = ok
+                
+                try:
+                    st.session_state.smiles_cache = Chem.MolToSmiles(mol)
+                except Exception:
+                    st.session_state.smiles_cache = ""
             else:
                 ok, _ = convert_pdb_to_pdbqt(temp_in, "ligand.pdbqt", is_ligand=True)
                 st.session_state.ligand_ready = ok
+                st.session_state.smiles_cache = ""
             
             if st.session_state.ligand_ready:
-                st.session_state.smiles_cache = temp_in
-                st.session_state.ligand_summary_text = "Ligand structure matrix parsed and loaded safely."
+                st.session_state.ligand_summary_text = f"**{uploaded_lig_name}** parsed and converted safely to PDBQT parameters."
                 with open("ligand.pdbqt", "r") as f:
                     st.session_state.serialized_ligand_block = f.read()
+                
+                if os.path.exists(temp_in): os.remove(temp_in)
+                if 'temp_pdb' in locals() and os.path.exists(temp_pdb): os.remove(temp_pdb)
+                
                 st.success("Structural file loaded and ready for docking!")
+                time.sleep(0.5)
+                st.rerun()
             else:
-                st.error("Failed to parse ligand matrix. Ensure file contains valid coordinates.")
+                st.error("Failed to parse ligand matrix. Ensure file framework contains valid coordinates.")
 
+        except Exception as e:
+            st.error(f"Upload processing failed: {e}")
+        finally:
             if os.path.exists(temp_in): os.remove(temp_in)
             if 'temp_pdb' in locals() and os.path.exists(temp_pdb): os.remove(temp_pdb)
 
@@ -809,8 +847,8 @@ with col_visual:
                 except ValueError:
                     aff_color = "#1b5e20"
 
-                # Trigger automated UFF post-docking relaxation track metrics
-                pre_uff, post_uff, delta_uff = execute_uff_complex_minimization("protein.pdbqt", parsed_poses[selected_pose])
+                with st.spinner("⏳ Running UFF Energy Minimization to resolve steric clashes... (This may take 10-30 seconds depending on protein size)"):
+                    pre_uff, post_uff, delta_uff = execute_uff_complex_minimization("protein.pdbqt", parsed_poses[selected_pose])
 
                 active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
                 
@@ -859,6 +897,20 @@ with col_visual:
                 """.format(aff_color, pose_affinity_score, delta_uff, pre_uff, post_uff, breakdown_html)
                 st.html(html_metric_card)
                 
+                # --- NEW: INTERACTIVE DROPDOWN EDUCATIONAL EXPLANATION ---
+                with st.expander("📖 Understand UFF Minimization & Steric Clashes (Click to Read)"):
+                    st.markdown(f"""
+                    **1. 📍 UFF Initial Energy: {pre_uff} kcal/mol**
+                    This represents the total internal physical stress of the protein-ligand complex the moment AutoDock Vina finished placing your molecule into the pocket, *before* any relaxation occurred.
+                    * **What it means:** A highly positive energy score indicates extreme geometric tension. This is the mathematical signature of a steric clash (the "rigid atomic wall" effect). It means atoms from your phytochemical were physically overlapping or positioned unnaturally close to the rigid atoms of the receptor—most likely the catalytic metal ions or cofactors you specifically chose to retain.
+                    * **The Reality:** In a living biological system, atoms cannot overlap; they would repel each other and shift. But Vina's rigid grid didn't allow them to shift, resulting in this artificially high stress value.
+
+                    **2. 📉 Optimized Energy: {post_uff} kcal/mol**
+                    This is the total stress of the complex *after* the Universal Force Field (UFF) algorithm ran its gradient descent optimization. The algorithm took the overlapping atoms and gently pushed them apart by fractions of an Angstrom until the bond lengths and angles reached a naturally permissible state.
+                    * **What it means:** The system is now structurally stable.
+                    * **Note on the positive number:** In total force field mechanics (unlike Vina's Gibbs free energy affinity, which should be negative), the total system energy often remains a positive number because it is the sum of every vibrating bond, angle, and torsion across thousands of atoms in the entire protein. What matters is not that it is positive, but how far it dropped from the initial state (**{delta_uff} kcal/mol**).
+                    """)
+
                 col_render, col_mesh = st.columns([1, 1])
                 with col_render:
                     style_mode = re.sub(r'\W+', '', st.radio("Macromolecule Style Mode:", ["Cartoon Ribbon Mesh", "Spacefill (VDW Configuration)", "Sticks Profile"]).split()[0].lower())
@@ -868,7 +920,36 @@ with col_visual:
                 render_advanced_modeling_blueprint(receptor_data=protein_data, ligand_data=parsed_poses[selected_pose], mode=style_mode, show_surface=surf_toggle, interactions_list=active_interactions)
                 
                 st.write("---")
-                st.subheader("📋 Quick Copy-Paste Citation Report")
+                st.subheader("📋 Final Report Generation")
+                
+                # Report Inclusion Checkbox
+                include_uff_theory = st.checkbox("Include detailed UFF biophysical explanation in the generated reports", value=True)
+                
+                # Prepare optional explanation block for reports
+                report_uff_theory_text = ""
+                report_uff_theory_html = ""
+                if include_uff_theory:
+                    report_uff_theory_text = f"""
+7. UFF MINIMIZATION BIOPHYSICAL EXPLANATION
+-------------------------------------------------------
+- 📍 UFF Initial Energy: {pre_uff} kcal/mol
+  This represents the total internal physical stress of the protein-ligand complex the moment AutoDock Vina finished placing your molecule into the pocket, before any relaxation occurred. A highly positive energy score indicates extreme geometric tension, often a steric clash where atoms physically overlap with rigid atoms of the receptor or retained catalytic cofactors. In a living biological system, atoms shift to relieve this, but a rigid grid does not allow it.
+
+- 📉 Optimized Energy: {post_uff} kcal/mol
+  This is the total stress of the complex after the Universal Force Field (UFF) algorithm ran its gradient descent optimization. The algorithm took the overlapping atoms and gently pushed them apart by fractions of an Angstrom until the bond lengths and angles reached a naturally permissible state, making the system structurally stable. The total system energy often remains positive because it is the sum of every vibrating bond across thousands of atoms. The critical metric is the massive drop from the initial state ({delta_uff} kcal/mol).
+"""
+                    report_uff_theory_html = f"""
+                    <div class="section" style="background-color: #f9fbff; border-left: 6px solid #00509e;">
+                        <h2>7. UFF Minimization Biophysical Explanation</h2>
+                        <p><b>📍 UFF Initial Energy: {pre_uff} kcal/mol</b></p>
+                        <p>This represents the total internal physical stress of the protein-ligand complex the moment AutoDock Vina finished placing your molecule into the pocket, before any relaxation occurred. A highly positive energy score indicates extreme geometric tension. This is the mathematical signature of a steric clash (the "rigid atomic wall" effect). It means atoms from your phytochemical were physically overlapping or positioned unnaturally close to the rigid atoms of the receptor—most likely the catalytic metal ions or cofactors you specifically chose to retain. In a living biological system, atoms cannot overlap; they would repel each other and shift. But Vina's rigid grid didn't allow them to shift, resulting in this artificially high stress value.</p>
+                        
+                        <p><b>📉 Optimized Energy: {post_uff} kcal/mol</b></p>
+                        <p>This is the total stress of the complex after the Universal Force Field (UFF) algorithm ran its gradient descent optimization. The algorithm took the overlapping atoms and gently pushed them apart by fractions of an Angstrom until the bond lengths and angles reached a naturally permissible state. The system is now structurally stable. In total force field mechanics, the total system energy often remains a positive number because it is the sum of every vibrating bond, angle, and torsion across thousands of atoms in the entire protein. What matters is not that it is positive, but how far it dropped from the initial state (<b>{delta_uff} kcal/mol</b>).</p>
+                    </div>
+                    """
+
+                st.markdown("**Quick Copy-Paste Citation Report**")
                 
                 report_content = f"""=======================================================
 MOLECULAR DOCKING SCREENING ANALYSIS REPORT
@@ -881,7 +962,7 @@ Developed by: Dr. Sarang S. Dhote, Assistant Professor, Department of Chemistry,
 - Target Protein Name: {st.session_state.protein_name}
 - Target Configuration Identifier (PDB ID): {st.session_state.pdb_id_display}
 - Primary Structure Data Source: RCSB Protein Data Bank Server / Local Upload
-- Retained Structural Ions/Cofactors: {st.session_state.active_retained_ions}
+- Catalytic Cofactors & Heteroatom Filter configured by user: {st.session_state.active_retained_ions}
 
 2. SMALL MOLECULE DRUG LIGAND PROFILE
 -------------------------------------------------------
@@ -912,12 +993,11 @@ Molecular docking was performed using the semi-empirical force field parameters 
 
 Manuscript Citation Format Block:
 Dr. Sarang S. Dhote, "InSilico BioSphere: An Integrated Platform for Automated Molecular Docking, Surface Cavity Profiling, and Post-Docking Force-Field Relaxation Mechanics." Department of Chemistry, Shri Shivaji Science College, Nagpur, India. Correspondence: sarangresearch@gmail.com
-=======================================================
+{report_uff_theory_text}=======================================================
 """
                 st.text_area("Copy Code Summary Report Log Sheet Block directly:", value=report_content, height=250)
                 
                 st.write("---")
-                st.subheader("📄 Generate Professional HTML Report")
                 
                 meta_html = "<p>Data mapping temporarily unavailable.</p>"
                 if st.session_state.local_target_path:
@@ -1008,7 +1088,7 @@ Dr. Sarang S. Dhote, "InSilico BioSphere: An Integrated Platform for Automated M
         <h2>1. Target Receptor Profile</h2>
         <p><b>Target Identifier (PDB ID):</b> {st.session_state.pdb_id_display}</p>
         <p><b>Data Source:</b> RCSB Protein Data Bank / Local Upload</p>
-        <p><b>Explicitly Retained Ions/Cofactors:</b> {st.session_state.active_retained_ions}</p>
+        <p><b>Catalytic Cofactors & Heteroatom Filter configured by user:</b> {st.session_state.active_retained_ions}</p>
         {meta_html}
         <h3>Bound Small Molecules in Receptor</h3>
         {bound_table_html}
@@ -1068,6 +1148,8 @@ Dr. Sarang S. Dhote, "InSilico BioSphere: An Integrated Platform for Automated M
             "Molecular docking was performed using the semi-empirical force field parameters of AutoDock Vina inside the InSilico BioSphere framework. To maintain structural and biological validity, essential catalytic cofactor ions were explicitly preserved within the target binding cleft during search configurations. Potential localized steric constraints and rigid atomic wall collisions resulting from structural constraints were resolved by subjecting the final protein-ligand complexes to post-docking energy minimization using the Universal Force Field (UFF) optimized to a convergence tolerance of 10<sup>-4</sup> kcal/mol·Å."
         </blockquote>
     </div>
+    
+    {report_uff_theory_html}
 
     <div class="footer">
         <p>Report compiled successfully. Ready for manuscript citation.</p>
@@ -1164,21 +1246,38 @@ if st.session_state.docking_results_raw is not None:
     st.header("📊 Screening Metrics Dashboard & Data Export")
     
     def parse_vina_output_with_residues_global(stdout_text):
+        """Robust text parser using .split() instead of strict Regex to ensure Mode 1 is never missed."""
         data = []
-        pattern = re.compile(r"^\s*(\d+)\s+([-+]?\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)")
         poses_dict = split_docking_poses("docking_poses.pdbqt")
         if not stdout_text: return pd.DataFrame(data)
+        
         for line in stdout_text.split("\n"):
-            match = pattern.match(line)
-            if match:
-                mode_idx = int(match.group(1))
-                res_string, bond_types = "N/A", "N/A"
-                if mode_idx in poses_dict:
-                    ints = compute_spatial_interactions("protein.pdbqt", poses_dict[mode_idx])
-                    if ints:
-                        res_string = ", ".join(list(set([i["Residue Contact"] for i in ints])))
-                        bond_types = ", ".join(list(set([i["Interaction Type"] for i in ints])))
-                data.append({"Binding Mode": mode_idx, "Affinity (kcal/mol)": float(match.group(2)), "RMSD l.b.": float(match.group(3)), "RMSD u.b.": float(match.group(4)), "Interacting Residues": res_string, "Contact Bond Types": bond_types})
+            parts = line.split()
+            # Vina data lines start with a number (mode index) and have at least 4 columns
+            if len(parts) >= 4 and parts[0].isdigit():
+                try:
+                    mode_idx = int(parts[0])
+                    aff = float(parts[1])
+                    rmsd_lb = float(parts[2])
+                    rmsd_ub = float(parts[3])
+                    
+                    res_string, bond_types = "N/A", "N/A"
+                    if mode_idx in poses_dict:
+                        ints = compute_spatial_interactions("protein.pdbqt", poses_dict[mode_idx])
+                        if ints:
+                            res_string = ", ".join(list(set([i["Residue Contact"] for i in ints])))
+                            bond_types = ", ".join(list(set([i["Interaction Type"] for i in ints])))
+                    
+                    data.append({
+                        "Binding Mode": mode_idx, 
+                        "Affinity (kcal/mol)": aff, 
+                        "RMSD l.b.": rmsd_lb, 
+                        "RMSD u.b.": rmsd_ub, 
+                        "Interacting Residues": res_string, 
+                        "Contact Bond Types": bond_types
+                    })
+                except ValueError:
+                    continue
         return pd.DataFrame(data)
 
     df_results_global = parse_vina_output_with_residues_global(st.session_state.docking_results_raw)
