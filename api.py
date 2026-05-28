@@ -150,10 +150,7 @@ def parse_bound_ligands(file_path):
 
 
 def identify_protein_cavities(pdbqt_file, max_pockets=5):
-    """
-    Scans the protein matrix coordinates to locate major geometric cavities 
-    by identifying localized spatial densities of exposed concave points.
-    """
+    """Scans the protein matrix coordinates to locate major geometric cavities."""
     coords = []
     if not os.path.exists(pdbqt_file): return []
         
@@ -297,15 +294,15 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=Fals
             if mol: torsions = AllChem.CalcNumRotatableBonds(mol)
         except Exception: torsions = 4
     try:
+        atom_count = 0
         with open(input_pdb, "r") as pdb, open(output_pdbqt, "w") as pdbqt:
             if is_ligand: pdbqt.write("ROOT\n")
             for line in pdb:
-                if line.startswith("ATOM") or (line.startswith("HETATM") and not is_ligand):
+                if line.startswith("ATOM") or (line.startswith("HETATM") and not is_ligand) or (line.startswith("HETATM") and is_ligand):
                     record_type = line[:6].strip()
                     res_name = line[17:20].strip()
                     
-                    # Strictly intercept and bypass rejected crystallization buffer noise/water profiles
-                    if record_type == "HETATM" and res_name not in allowed_heteroatoms:
+                    if record_type == "HETATM" and not is_ligand and res_name not in allowed_heteroatoms:
                         continue
                         
                     try: atom_id = int(line[6:11].strip())
@@ -321,12 +318,15 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=Fals
                     element = ''.join([c for c in element if c.isalpha()]).upper()
                     vina_type = autodock_type_map.get(element, element.title())
                     if element == "C" and "AR" in atom_name.upper(): vina_type = "A"
-                    pdbqt.write(f"ATOM  {atom_id:>5} {atom_name:<4} {res_name:>3} {chain_id}{res_seq:>4}    {x:>8.3f}{y:>8.3f}{z:>8.3f}{1.00:>6.2f}{0.00:>6.2f}    +0.000 {vina_type:<2}\n")
+                    
+                    prefix = "ATOM  " if not is_ligand else "ATOM  "
+                    pdbqt.write(f"{prefix}{atom_id:>5} {atom_name:<4} {res_name:>3} {chain_id}{res_seq:>4}    {x:>8.3f}{y:>8.3f}{z:>8.3f}{1.00:>6.2f}{0.00:>6.2f}    +0.000 {vina_type:<2}\n")
+                    atom_count += 1
             if is_ligand:
                 pdbqt.write("ENDROOT\n")
                 pdbqt.write(f"TORSDOF {torsions}\n")
             else: pdbqt.write("ENDMDL\n")
-        return True, output_pdbqt
+        return atom_count > 0, output_pdbqt
     except Exception as e: return False, str(e)
 
 
@@ -339,9 +339,9 @@ def convert_smiles_to_pdbqt(smiles_string, output_filename="ligand.pdbqt"):
         AllChem.MMFFOptimizeMolecule(mol)
         temp_pdb = "temp_ligand.pdb"
         Chem.MolToPDBFile(mol, temp_pdb)
-        convert_pdb_to_pdbqt(temp_pdb, output_filename, is_ligand=True)
+        ok, _ = convert_pdb_to_pdbqt(temp_pdb, output_filename, is_ligand=True)
         if os.path.exists(temp_pdb): os.remove(temp_pdb)
-        return True, output_filename
+        return ok, output_filename
     except Exception as e: return False, str(e)
 
 
@@ -575,7 +575,7 @@ with col_params:
                 ok, err = convert_pdb_to_pdbqt(st.session_state.local_target_path, "protein.pdbqt", is_ligand=False, allowed_heteroatoms=selected_hets)
                 if ok:
                     st.success(f"Receptor rebuilt successfully! Retained: {', '.join(selected_hets) if selected_hets else 'None'}")
-                    st.session_state.detected_pockets = [] # Clear stale pocket cache
+                    st.session_state.detected_pockets = [] 
                 else:
                     st.error(f"Receptor optimization failure: {err}")
 
@@ -625,9 +625,10 @@ with col_params:
             with open(temp_in, "wb") as f:
                 f.write(uploaded_lig_buffer.getbuffer())
             
+            # Hybrid robust parsing track optimization boundary line
             mol = Chem.MolFromPDBFile(temp_in, removeHs=False) if uploaded_lig_name.endswith(".pdb") else Chem.SDMolSupplier(temp_in, removeHs=False)[0]
             
-            if mol:
+            if mol is not None:
                 try:
                     Chem.SanitizeMol(mol)
                     AllChem.AssignBondOrdersFromTopology(mol)
@@ -640,20 +641,26 @@ with col_params:
                 
                 temp_pdb = "temp_lig_state.pdb"
                 Chem.MolToPDBFile(mol, temp_pdb)
-                convert_pdb_to_pdbqt(temp_pdb, "ligand.pdbqt", is_ligand=True)
-                
-                st.session_state.ligand_ready = True
+                ok, _ = convert_pdb_to_pdbqt(temp_pdb, "ligand.pdbqt", is_ligand=True)
+                st.session_state.ligand_ready = ok
+            else:
+                # Direct structural matrix block conversion safety fallback track
+                ok, _ = convert_pdb_to_pdbqt(temp_in, "ligand.pdbqt", is_ligand=True)
+                st.session_state.ligand_ready = ok
+            
+            if st.session_state.ligand_ready:
                 st.session_state.smiles_cache = temp_in
-                st.session_state.ligand_summary_text = "Ligand structure loaded successfully from uploaded file matrix."
+                st.session_state.ligand_summary_text = "Ligand structure matrix parsed and loaded safely."
                 with open("ligand.pdbqt", "r") as f:
                     st.session_state.serialized_ligand_block = f.read()
-                
-                if os.path.exists(temp_in): os.remove(temp_in)
-                if os.path.exists(temp_pdb): os.remove(temp_pdb)
-                
                 st.success("Structural file loaded and ready for docking!")
+            else:
+                st.error("Failed to parse ligand matrix. Ensure file framework contains valid coordinates.")
 
-    if st.session_state.target_ready and os.path.exists("ligand.pdbqt"):
+            if os.path.exists(temp_in): os.remove(temp_in)
+            if 'temp_pdb' in locals() and os.path.exists(temp_pdb): os.remove(temp_pdb)
+
+    if st.session_state.target_ready and os.path.exists("ligand.pdbqt") and os.path.getsize("ligand.pdbqt") > 20:
         st.session_state.ligand_ready = True
 
     if st.session_state.ligand_ready:
