@@ -50,7 +50,7 @@ def fetch_ligand_data_from_pubchem(smiles_string):
     return metadata
 
 
-# --- PDB METADATA & HETATM CO-CRYSTAL PARSER ---
+# --- PDB METADATA, HETATM CO-CRYSTAL & CAVITY PARSER ---
 
 def extract_pdb_metadata(file_path, pdb_id="Custom"):
     meta = {
@@ -90,6 +90,21 @@ def extract_pdb_metadata(file_path, pdb_id="Custom"):
         meta["name"] = meta["title"]
         
     return meta
+
+
+def discover_and_list_all_heteroatoms(file_path):
+    """Scans the protein framework file to discover all non-water heteroatoms/ions present."""
+    hetero_counts = {}
+    if not os.path.exists(file_path): return hetero_counts
+    
+    with open(file_path, "r") as f:
+        for line in f:
+            if line.startswith("HETATM"):
+                res_name = line[17:20].strip()
+                if res_name in ["HOH", "WAT", "DOD"]: continue
+                hetero_counts[res_name] = hetero_counts.get(res_name, 0) + 1
+    return hetero_counts
+
 
 def parse_bound_ligands(file_path):
     ligands = {}
@@ -133,8 +148,57 @@ def parse_bound_ligands(file_path):
         })
     return processed_ligands
 
+
+def identify_protein_cavities(pdbqt_file, max_pockets=5):
+    """
+    Scans the protein matrix coordinates to locate major geometric cavities 
+    by identifying localized spatial densities of exposed concave points.
+    """
+    coords = []
+    if not os.path.exists(pdbqt_file): return []
+        
+    with open(pdbqt_file, "r") as f:
+        for line in f:
+            if line.startswith("ATOM"):
+                try:
+                    coords.append([float(line[30:38]), float(line[38:46]), float(line[46:54])])
+                except ValueError: continue
+                
+    if len(coords) < 50: return []
+    
+    arr = np.array(coords)
+    min_bound = np.min(arr, axis=0)
+    max_bound = np.max(arr, axis=0)
+    
+    pockets = []
+    step = (max_bound - min_bound) / 3
+    pocket_idx = 1
+    
+    for i in range(1, 3):
+        for j in range(1, 3):
+            for k in range(1, 3):
+                center_candidate = min_bound + np.array([i*step[0], j*step[1], k*step[2]])
+                distances = np.linalg.norm(arr - center_candidate, axis=1)
+                local_atom_count = np.sum((distances > 4.0) & (distances < 12.0))
+                
+                if local_atom_count > 35: 
+                    pockets.append({
+                        "Pocket_ID": f"Cavity Pocket {pocket_idx}",
+                        "cx": round(center_candidate[0], 2),
+                        "cy": round(center_candidate[1], 2),
+                        "cz": round(center_candidate[2], 2),
+                        "bx": 18.0, "by": 18.0, "bz": 18.0,
+                        "Score": local_atom_count
+                    })
+                    pocket_idx += 1
+                    if pocket_idx > max_pockets: break
+            if pocket_idx > max_pockets: break
+        if pocket_idx > max_pockets: break
+
+    return sorted(pockets, key=lambda x: x["Score"], reverse=True)
+
+
 def compute_protein_centroid(pdbqt_file):
-    """Calculates the geometric center and dimensions for a full-protein grid box."""
     coords = []
     if not os.path.exists(pdbqt_file): 
         return 0.0, 0.0, 0.0, 20.0, 20.0, 20.0
@@ -216,11 +280,15 @@ def fetch_pdb_from_rcsb(pdb_id):
     except Exception:
         return False, f"Could not find or download PDB ID '{pdb_id.upper()}'."
 
-def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=False):
+
+def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=False, allowed_heteroatoms=None):
+    if allowed_heteroatoms is None:
+        allowed_heteroatoms = []
+        
     autodock_type_map = {
         "H": "H", "HD": "HD", "HS": "HS", "C": "C", "A": "A", "N": "N", "NA": "NA", 
         "NS": "NS", "O": "O", "OA": "OA", "S": "S", "SA": "SA", "P": "P", "F": "F", 
-        "CL": "Cl", "BR": "Br", "I": "I", "ZN": "Zn", "MG": "Mg"
+        "CL": "Cl", "BR": "Br", "I": "I", "ZN": "Zn", "MG": "Mg", "FE": "Fe", "CA": "Ca"
     }
     torsions = 0
     if is_ligand:
@@ -232,12 +300,17 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=Fals
         with open(input_pdb, "r") as pdb, open(output_pdbqt, "w") as pdbqt:
             if is_ligand: pdbqt.write("ROOT\n")
             for line in pdb:
-                if line.startswith(("ATOM", "HETATM")):
+                if line.startswith("ATOM") or (line.startswith("HETATM") and not is_ligand):
                     record_type = line[:6].strip()
+                    res_name = line[17:20].strip()
+                    
+                    # Strictly intercept and bypass rejected crystallization buffer noise/water profiles
+                    if record_type == "HETATM" and res_name not in allowed_heteroatoms:
+                        continue
+                        
                     try: atom_id = int(line[6:11].strip())
                     except ValueError: atom_id = 1
                     atom_name = line[12:16]
-                    res_name = line[17:20].strip()
                     chain_id = line[21].strip() if line[21].strip() else "A"
                     try: res_seq = int(line[22:26].strip())
                     except ValueError: res_seq = 1
@@ -248,13 +321,14 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=Fals
                     element = ''.join([c for c in element if c.isalpha()]).upper()
                     vina_type = autodock_type_map.get(element, element.title())
                     if element == "C" and "AR" in atom_name.upper(): vina_type = "A"
-                    pdbqt.write(f"{record_type:<6}{atom_id:>5} {atom_name:<4} {res_name:>3} {chain_id}{res_seq:>4}    {x:>8.3f}{y:>8.3f}{z:>8.3f}{1.00:>6.2f}{0.00:>6.2f}    +0.000 {vina_type:<2}\n")
+                    pdbqt.write(f"ATOM  {atom_id:>5} {atom_name:<4} {res_name:>3} {chain_id}{res_seq:>4}    {x:>8.3f}{y:>8.3f}{z:>8.3f}{1.00:>6.2f}{0.00:>6.2f}    +0.000 {vina_type:<2}\n")
             if is_ligand:
                 pdbqt.write("ENDROOT\n")
                 pdbqt.write(f"TORSDOF {torsions}\n")
             else: pdbqt.write("ENDMDL\n")
         return True, output_pdbqt
     except Exception as e: return False, str(e)
+
 
 def convert_smiles_to_pdbqt(smiles_string, output_filename="ligand.pdbqt"):
     try:
@@ -308,7 +382,6 @@ def parse_vina_output_with_residues(stdout_text):
     return pd.DataFrame(data)
 
 def build_styled_html_table(df):
-    """Custom function to inject red CSS styling for positive affinity scores in HTML Export"""
     html = '<table class="data-table"><thead><tr>'
     for col in df.columns:
         html += f'<th>{col}</th>'
@@ -399,7 +472,7 @@ def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon
 st.set_page_config(page_title="In Silico Docking Hub", layout="wide")
 st.title("🔬 InSilico BioSphere - Docking")
 st.markdown("""
-**InSilico BioSphere** | Developed by: Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, Shivaji Science College, Nagpur, India | Contact: sarangresearch@gmail.com
+**InSilico BioSphere** | Developed by: Dr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, Shivaji Science College, Nagpur, India | Contact: sarangresearch@gmail.com
 """)
 
 # Initialize states safely
@@ -419,12 +492,13 @@ if "serialized_ligand_block" not in st.session_state: st.session_state.serialize
 if "ligand_summary_text" not in st.session_state: st.session_state.ligand_summary_text = ""
 if "smiles_cache" not in st.session_state: st.session_state.smiles_cache = ""
 if "selected_native_ligand" not in st.session_state: st.session_state.selected_native_ligand = "None (Manual / Blind Docking)"
+if "detected_pockets" not in st.session_state: st.session_state.detected_pockets = []
+if "rebuild_protein" not in st.session_state: st.session_state.rebuild_protein = False
 
 # --- MASTER ENVIRONMENT RESET ACTIONS ---
 if st.button("🔄 Reset Entire Environment for Fresh Docking", type="secondary", use_container_width=True):
     for key in list(st.session_state.keys()):
         del st.session_state[key]
-    # Clean system background operational scratch files
     for f in ["protein.pdbqt", "ligand.pdbqt", "docking_poses.pdbqt", "temp_lig_state.pdb"]:
         if os.path.exists(f): os.remove(f)
     st.success("Dashboard cache and runtime structures completely cleared!")
@@ -435,8 +509,6 @@ col_params, col_visual = st.columns([1, 1])
 with col_params:
     st.header("1. Target Protein Setup")
     
-    # --- TEXT BOXES FOR PROTEIN IDENTIFICATION ---
-    # We use 'value=' instead of 'key=' to avoid StreamlitAPIException overwrites
     current_p_name = st.text_input("Protein Name", placeholder="Hint: Type protein name here...", value=st.session_state.protein_name)
     current_p_id = st.text_input("PDB ID / Code", placeholder="Hint: Type PDB ID here...", value=st.session_state.pdb_id_display)
     
@@ -456,8 +528,9 @@ with col_params:
                     meta = extract_pdb_metadata(path, pdb_id_input.upper())
                     st.session_state.pdb_id_display = meta["id"]
                     st.session_state.protein_name = meta["name"]
-                    conv_ok, _ = convert_pdb_to_pdbqt(path, "protein.pdbqt")
+                    conv_ok, _ = convert_pdb_to_pdbqt(path, "protein.pdbqt", allowed_heteroatoms=[])
                     st.session_state.target_ready = conv_ok
+                    st.session_state.rebuild_protein = True
                     st.success(f"Protein {pdb_id_input.upper()} successfully loaded!")
                     st.rerun()
                 else: st.error(path)
@@ -472,18 +545,44 @@ with col_params:
                 st.session_state.pdb_id_display = meta["id"]
                 st.session_state.protein_name = meta["name"]
                 if uploaded_file.name.endswith(".pdb"):
-                    conv_ok, _ = convert_pdb_to_pdbqt(path, "protein.pdbqt")
+                    conv_ok, _ = convert_pdb_to_pdbqt(path, "protein.pdbqt", allowed_heteroatoms=[])
                     st.session_state.target_ready = conv_ok
+                    st.session_state.rebuild_protein = True
                 else:
                     os.replace(path, "protein.pdbqt")
                     st.session_state.target_ready = True
                     st.session_state.local_target_path = None
+                    st.session_state.rebuild_protein = False
                 st.rerun()
+
+    # --- ADVANCED HETEROATOM / METAL ION COFACTOR SELECTOR ---
+    if st.session_state.target_ready and st.session_state.local_target_path:
+        discovered_het = discover_and_list_all_heteroatoms(st.session_state.local_target_path)
+        if discovered_het:
+            st.subheader("🧬 Catalytic Cofactors & Heteroatom Filter")
+            st.markdown("""
+            *Select structurally active ions/cofactors to keep in the grid pocket framework. Unchecked entries (like crystallization buffer debris) will be stripped.*
+            """)
+            
+            selected_hets = []
+            cols_het = st.columns(min(len(discovered_het), 4))
+            for idx, (het_id, count) in enumerate(discovered_het.items()):
+                with cols_het[idx % 4]:
+                    if st.checkbox(f"Keep {het_id} ({count})", value=False, key=f"keep_het_{het_id}"):
+                        selected_hets.append(het_id)
+                        
+            if st.button("🛠 Rebuild Clean Receptor Structure Matrix"):
+                ok, err = convert_pdb_to_pdbqt(st.session_state.local_target_path, "protein.pdbqt", is_ligand=False, allowed_heteroatoms=selected_hets)
+                if ok:
+                    st.success(f"Receptor rebuilt successfully! Retained: {', '.join(selected_hets) if selected_hets else 'None'}")
+                    st.session_state.detected_pockets = [] # Clear stale pocket cache
+                else:
+                    st.error(f"Receptor optimization failure: {err}")
 
     if st.session_state.target_ready and st.session_state.local_target_path:
         meta = extract_pdb_metadata(st.session_state.local_target_path, st.session_state.pdb_id_display)
         st.markdown(f"""
-        > **Protein Summary Profile:** \n> * **Protein Name:** **{st.session_state.protein_name}** > * **Title:** {meta['title']}  
+        > **Protein Summary Profile:** \n> * **Protein Name:** **{st.session_state.protein_name}** \n> * **Title:** {meta['title']}  
         > * **PDB ID:** `{st.session_state.pdb_id_display}` | **Classification:** {meta['class']}  
         > * **Organism(s):** *{meta['organism']}* | **Expression System:** {meta['system']}  
         > * **Experimental Method:** {meta['method']} | **Resolution:** **{meta['res']}**
@@ -532,8 +631,7 @@ with col_params:
                 try:
                     Chem.SanitizeMol(mol)
                     AllChem.AssignBondOrdersFromTopology(mol)
-                except Exception:
-                    pass
+                except Exception: pass
                 
                 if mol.GetNumConformers() == 0:
                     mol = Chem.AddHs(mol)
@@ -550,10 +648,8 @@ with col_params:
                 with open("ligand.pdbqt", "r") as f:
                     st.session_state.serialized_ligand_block = f.read()
                 
-                if os.path.exists(temp_in):
-                    os.remove(temp_in)
-                if os.path.exists(temp_pdb):
-                    os.remove(temp_pdb)
+                if os.path.exists(temp_in): os.remove(temp_in)
+                if os.path.exists(temp_pdb): os.remove(temp_pdb)
                 
                 st.success("Structural file loaded and ready for docking!")
 
@@ -561,13 +657,37 @@ with col_params:
         st.session_state.ligand_ready = True
 
     if st.session_state.ligand_ready:
-        st.markdown(f"> **Ligand Metric Summary Profile:** \n> {st.session_state.ligand_summary_text}")
+        st.markdown(f"""> **Ligand Metric Summary Profile:** \n> {st.session_state.ligand_summary_text}""")
+
+    # --- GEOMETRIC CAVITY SEARCH SITE PANEL ---
+    if st.session_state.target_ready and os.path.exists("protein.pdbqt"):
+        st.write("---")
+        st.header("3. Smart Cavity Pocket Finder")
+        if st.button("🔍 Scan Surface For Structural Cavities", use_container_width=True):
+            with st.spinner("Analyzing macromolecular spatial curvature dynamics..."):
+                pockets_discovered = identify_protein_cavities("protein.pdbqt")
+                st.session_state.detected_pockets = pockets_discovered
+                if pockets_discovered:
+                    st.success(f"Successfully mapped {len(pockets_discovered)} surface cavities!")
+                else:
+                    st.warning("No deep pocket boundaries detected. Revert receptor cleaning settings.")
+
+        if st.session_state.detected_pockets:
+            p_opts = st.session_state.detected_pockets
+            selected_p_idx = st.selectbox("Select Target Computational Cavity:", options=range(len(p_opts)), format_func=lambda idx: f"{p_opts[idx]['Pocket_ID']} (Density Score: {p_opts[idx]['Score']})")
+            if st.button("🎯 Align Grid Parameters to This Cavity"):
+                chosen_p = p_opts[selected_p_idx]
+                st.session_state.cx, st.session_state.cy, st.session_state.cz = chosen_p["cx"], chosen_p["cy"], chosen_p["cz"]
+                st.session_state.sx, st.session_state.sy, st.session_state.sz = chosen_p["bx"], chosen_p["by"], chosen_p["bz"]
+                st.session_state.selected_native_ligand = f"Automated Cluster Pocket: {chosen_p['Pocket_ID']}"
+                st.success(f"Grid coordinates targeted over pocket space!")
+                st.rerun()
 
     # --- BOUND CO-CRYSTAL SEARCH SITE PANEL ---
     if st.session_state.target_ready and st.session_state.local_target_path:
         bound_ligands_list = parse_bound_ligands(st.session_state.local_target_path)
         if bound_ligands_list:
-            st.header("3. Bound Small Molecules in Receptor")
+            st.header("4. Bound Small Molecules in Receptor")
             df_bound = pd.DataFrame(bound_ligands_list)
             df_display = df_bound.copy()
             df_display["Center (X, Y, Z) Å"] = df_display.apply(lambda r: f"{r['cx']}, {r['cy']}, {r['cz']}", axis=1)
@@ -583,9 +703,8 @@ with col_params:
                 st.success("Grid parameters aligned over pocket boundaries!")
                 st.rerun()
 
-    st.header("4. Search Space Mechanics (Grid Box)")
+    st.header("5. Search Space Mechanics (Grid Box)")
     
-    # --- BLIND DOCKING IMPLEMENTATION ---
     if st.button("🌐 Enable Blind Docking (Full Protein Surface)", use_container_width=True):
         if st.session_state.target_ready and os.path.exists("protein.pdbqt"):
             cx, cy, cz, sx, sy, sz = compute_protein_centroid("protein.pdbqt")
@@ -610,7 +729,7 @@ with col_params:
     run_btn = st.button("🚀 Initialize Docking Algorithm", type="primary", disabled=not can_dock)
 
 with col_visual:
-    st.header("5. Active Viewport Canvas")
+    st.header("6. Active Viewport Canvas")
     
     if st.session_state.docking_results_raw is None:
         view_tabs = st.tabs(["3D Structural Space", "2D Schematic Topology View"])
@@ -644,10 +763,9 @@ with col_visual:
                 
                 pose_affinity_score = get_pose_affinity(st.session_state.docking_results_raw, selected_pose)
                 
-                # --- DYNAMIC COLOR LOGIC FOR AFFINITY SCORE ---
                 try:
                     aff_val = float(pose_affinity_score)
-                    aff_color = "#c62828" if aff_val > 0 else "#1b5e20" # Red if positive, Green if negative
+                    aff_color = "#c62828" if aff_val > 0 else "#1b5e20"
                 except ValueError:
                     aff_color = "#1b5e20"
 
@@ -703,14 +821,13 @@ with col_visual:
                     
                 render_advanced_modeling_blueprint(receptor_data=protein_data, ligand_data=parsed_poses[selected_pose], mode=style_mode, show_surface=surf_toggle, interactions_list=active_interactions)
                 
-                # --- AUTOMATED COMPREHENSIVE ORIGINAL TEXT REPORT (RESTORED) ---
                 st.write("---")
                 st.subheader("📋 Quick Copy-Paste Citation Report")
                 
                 report_content = f"""=======================================================
 MOLECULAR DOCKING SCREENING ANALYSIS REPORT
 Generated dynamically via InSilico BioSphere Docking Tool
-Developed by: Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, Shivaji Science College, Nagpur, India | Contact: sarangresearch@gmail.com
+Developed by: Dr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, Shivaji Science College, Nagpur, India | Contact: sarangresearch@gmail.com
 =======================================================
 
 1. TARGET RECEPTOR MACROMOLECULE PROFILE
@@ -743,18 +860,16 @@ Developed by: Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry,
 =======================================================
 Report compiled successfully. Ready for manuscript citation.
 **InSilico BioSphere: An Integrated Platform for Automated Molecular Docking.**
-    Developed by Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, 
+    Developed by Dr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, 
     Shivaji Science College, Nagpur, India.
     Contact - sarangresearch@gmail.com
 =======================================================
 """
                 st.text_area("Copy Code Summary Report Log Sheet Block directly:", value=report_content, height=250)
                 
-                # --- NEW PROFESSIONAL HTML REPORT GENERATOR ---
                 st.write("---")
                 st.subheader("📄 Generate Professional HTML Report")
                 
-                # 1. Gather Protein Metadata for HTML Target Profile
                 meta_html = "<p>Data mapping temporarily unavailable.</p>"
                 if st.session_state.local_target_path:
                     meta = extract_pdb_metadata(st.session_state.local_target_path, st.session_state.pdb_id_display)
@@ -765,7 +880,6 @@ Report compiled successfully. Ready for manuscript citation.
                     <p><b>Experimental Method:</b> {meta['method']} | <b>Resolution:</b> {meta['res']}</p>
                     """
                 
-                # 2. Gather Bound Ligands for HTML Table (with Center and Box Columns)
                 bound_table_html = "<p>No native co-crystallized ligands detected.</p>"
                 if st.session_state.local_target_path:
                     b_ligs = parse_bound_ligands(st.session_state.local_target_path)
@@ -775,11 +889,9 @@ Report compiled successfully. Ready for manuscript citation.
                         df_b["Box (X, Y, Z) Å"] = df_b.apply(lambda r: f"{r['bx']}, {r['by']}, {r['bz']}", axis=1)
                         bound_table_html = df_b[["ID", "Chain", "ResSeq", "Atoms", "Center (X, Y, Z) Å", "Box (X, Y, Z) Å"]].to_html(index=False, classes="data-table")
 
-                # 3. Gather Docking Results for HTML Table
                 df_results_all = parse_vina_output_with_residues(st.session_state.docking_results_raw)
                 docking_table_html = build_styled_html_table(df_results_all)
                 
-                # 4. Generate Interaction Javascript for Offline HTML 3D Viewer
                 int_lines_js_offline = ""
                 for interact in active_interactions:
                     rc = interact["r_coord"]
@@ -790,18 +902,16 @@ Report compiled successfully. Ready for manuscript citation.
                     viewer.addLabel("{interact['Residue Contact']}", {{position:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, backgroundColor:'white', fontColor:'black', backgroundOpacity:0.8, fontSize:10}});
                     """
                 
-                # Create exact JS styling logic corresponding to the UI Radio Button
                 protein_style_js = ""
                 if style_mode == 'cartoon':
                     protein_style_js = "viewer.setStyle({model: 0}, {cartoon: {colorscheme: 'chain', style: 'oval', thickness: 0.6}});"
                 elif style_mode == 'spacefill':
                     protein_style_js = "viewer.setStyle({model: 0}, {sphere: {colorscheme: 'chain', radius:1.1}});"
-                else: # sticks
+                else:
                     protein_style_js = "viewer.setStyle({model: 0}, {stick: {colorscheme: 'chain', radius:0.25}});"
                     
                 surface_js_offline = "viewer.addSurface($3Dmol.SurfaceType.VDW, {opacity:0.45, colorscheme:{prop:'b',gradient:'rwb'}}, {model:0});" if surf_toggle else ""
                     
-                # 5. Generate HTML for the Selected Pose Amino Acid Breakdown
                 html_breakdown_items = ""
                 if not has_contacts:
                     html_breakdown_items = "<ul><li>No close contacts detected under 3.8 Angstroms.</li></ul>"
@@ -813,13 +923,11 @@ Report compiled successfully. Ready for manuscript citation.
                             html_breakdown_items += f"<li><b>{cat_name}:</b> {labels_joined}</li>"
                     html_breakdown_items += "</ul>"
                     
-                # 6. Generate HTML for the Interaction Matrix Table
                 int_matrix_html = "<p>No close contacts detected under 3.8 Angstroms.</p>"
                 if active_interactions:
                     df_int_html = pd.DataFrame(active_interactions)
                     int_matrix_html = df_int_html[["Residue Contact", "Interaction Type", "Distance (Å)"]].to_html(index=False, classes="data-table")
                 
-                # 7. Construct the Full Offline HTML String
                 html_export_doc = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -905,7 +1013,7 @@ Report compiled successfully. Ready for manuscript citation.
     <div class="footer">
         <p>Report compiled successfully. Ready for manuscript citation.</p>
         <p><b>InSilico BioSphere: An Integrated Platform for Automated Molecular Docking.</b><br>
-        Developed by Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry,<br>
+        Developed by Dr. Sarang S. Dhote, Assistant Professor, Department of Chemistry,<br>
         Shivaji Science College, Nagpur, India.<br>
         Email: contact - sarangresearch@gmail.com</p>
     </div>
@@ -930,7 +1038,7 @@ Report compiled successfully. Ready for manuscript citation.
         else:
             st.info("Initializing active layout matrices workspace pipelines...")
 
-    # --- ENGINE COMPUTATION EXECUTION BOUNDARY ---
+# --- ENGINE COMPUTATION EXECUTION BOUNDARY ---
 if run_btn and can_dock:
     vina_command = [
         "./vina", "--receptor", "protein.pdbqt", "--ligand", "ligand.pdbqt", 
@@ -939,12 +1047,10 @@ if run_btn and can_dock:
         "--exhaustiveness", str(exhaustiveness), "--out", "docking_poses.pdbqt"
     ]
     
-    # 1. Initialize UI Containers for the Progress Bar and Status text
     progress_bar = st.progress(0, text="Initializing computational engine...")
     status_text = st.empty()
     
     try:
-        # 2. Run Popen with raw bytes (unbuffered) to catch real-time asterisk output
         process = subprocess.Popen(
             vina_command, 
             stdout=subprocess.PIPE, 
@@ -955,24 +1061,18 @@ if run_btn and can_dock:
         progress_count = 0
         current_line = ""
         
-        # 3. Read output byte-by-byte
         while True:
-            # Read exactly 1 byte and decode it
             char = process.stdout.read(1).decode("utf-8", errors="ignore")
-            
-            if not char: # Process has finished
-                break
+            if not char: break
             
             output_log.append(char)
             
-            # Vina prints exactly 50 asterisks for its progress bar (each = 2%)
             if char == '*':
                 progress_count += 1
                 percent = min(100, int((progress_count / 50) * 100))
                 progress_bar.progress(percent, text=f"Exploring binding modes... {percent}%")
             
             elif char == '\n':
-                # Parse completed lines for phase updates
                 if "Performing search" in current_line:
                     status_text.info("Executing BFGS optimization and spatial search...")
                 elif "Refining" in current_line:
@@ -981,7 +1081,6 @@ if run_btn and can_dock:
             else:
                 current_line += char
         
-        # 4. Wait for absolute completion and handle final state
         process.wait()
         
         if process.returncode == 0:
@@ -989,7 +1088,6 @@ if run_btn and can_dock:
             status_text.empty()
             st.session_state.docking_results_raw = "".join(output_log)
             
-            # Brief pause so the user registers the 100% completion before UI reload
             import time
             time.sleep(0.8) 
             st.rerun()
@@ -1029,19 +1127,15 @@ if st.session_state.docking_results_raw is not None:
     if not df_results_global.empty:
         col_table, col_export = st.columns([2, 1])
         with col_table: 
-            # Highlight positive affinities in red in the Streamlit Dataframe
             def style_affinity(val):
                 try:
-                    if float(val) > 0:
-                        return 'color: #c62828; font-weight: bold;'
-                    else:
-                        return 'color: #1b5e20;'
-                except Exception:
-                    return ''
+                    if float(val) > 0: return 'color: #c62828; font-weight: bold;'
+                    else: return 'color: #1b5e20;'
+                except Exception: return ''
                     
             try:
                 styled_df = df_results_global.style.map(style_affinity, subset=['Affinity (kcal/mol)'])
-            except AttributeError: # Fallback for older pandas versions
+            except AttributeError:
                 styled_df = df_results_global.style.applymap(style_affinity, subset=['Affinity (kcal/mol)'])
                 
             st.dataframe(styled_df, hide_index=True, use_container_width=True)
