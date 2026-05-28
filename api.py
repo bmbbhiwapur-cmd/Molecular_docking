@@ -366,7 +366,6 @@ def execute_uff_complex_minimization(protein_path, ligand_pose_str):
         if not uff_field: return "N/A", "N/A", "N/A"
         
         pre_energy = uff_field.CalcEnergy()
-        # Optimized iterations to 150 for speedy UI response while retaining clash resolution
         uff_field.Minimize(maxIts=150, forceTol=1e-3)
         post_energy = uff_field.CalcEnergy()
         delta_energy = post_energy - pre_energy
@@ -542,6 +541,8 @@ if "selected_native_ligand" not in st.session_state: st.session_state.selected_n
 if "detected_pockets" not in st.session_state: st.session_state.detected_pockets = []
 if "rebuild_protein" not in st.session_state: st.session_state.rebuild_protein = False
 if "active_retained_ions" not in st.session_state: st.session_state.active_retained_ions = "None"
+if "uff_cache" not in st.session_state: st.session_state.uff_cache = {}
+if "last_uploaded_protein" not in st.session_state: st.session_state.last_uploaded_protein = ""
 
 # --- MASTER ENVIRONMENT RESET ACTIONS ---
 if st.button("🔄 Reset Entire Environment for Fresh Docking", type="secondary", use_container_width=True):
@@ -550,6 +551,7 @@ if st.button("🔄 Reset Entire Environment for Fresh Docking", type="secondary"
     for f in ["protein.pdbqt", "ligand.pdbqt", "docking_poses.pdbqt", "temp_lig_state.pdb"]:
         if os.path.exists(f): os.remove(f)
     st.success("Dashboard cache and runtime structures completely cleared!")
+    time.sleep(0.5)
     st.rerun()
 
 col_params, col_visual = st.columns([1, 1])
@@ -586,14 +588,16 @@ with col_params:
     else:
         uploaded_file = st.file_uploader("Upload Target Protein File", type=["pdb", "pdbqt"])
         if uploaded_file:
-            path = f"uploaded_{uploaded_file.name}"
-            if st.session_state.local_target_path != path:
+            # FIX: Only process if the file has changed to prevent infinite loops
+            if st.session_state.last_uploaded_protein != uploaded_file.name:
+                path = f"uploaded_{uploaded_file.name}"
                 with open(path, "wb") as f: f.write(uploaded_file.getbuffer())
                 st.session_state.local_target_path = path
                 meta = extract_pdb_metadata(path, "Uploaded File")
                 st.session_state.pdb_id_display = meta["id"]
                 st.session_state.protein_name = meta["name"]
-                if uploaded_file.name.endswith(".pdb"):
+                
+                if uploaded_file.name.lower().endswith(".pdb"):
                     conv_ok, _ = convert_pdb_to_pdbqt(path, "protein.pdbqt", allowed_heteroatoms=[])
                     st.session_state.target_ready = conv_ok
                     st.session_state.rebuild_protein = True
@@ -601,9 +605,11 @@ with col_params:
                 else:
                     os.replace(path, "protein.pdbqt")
                     st.session_state.target_ready = True
-                    st.session_state.local_target_path = None
+                    st.session_state.local_target_path = "protein.pdbqt" # FIX: Keep valid path state
                     st.session_state.rebuild_protein = False
                     st.session_state.active_retained_ions = "Pre-compiled PDBQT (Ions Unknown)"
+                
+                st.session_state.last_uploaded_protein = uploaded_file.name
                 st.rerun()
 
     # --- ADVANCED HETEROATOM / METAL ION COFACTOR SELECTOR ---
@@ -847,8 +853,14 @@ with col_visual:
                 except ValueError:
                     aff_color = "#1b5e20"
 
-                with st.spinner("⏳ Running UFF Energy Minimization to resolve steric clashes... (This may take 10-30 seconds depending on protein size)"):
-                    pre_uff, post_uff, delta_uff = execute_uff_complex_minimization("protein.pdbqt", parsed_poses[selected_pose])
+                # FIX: UFF Smart Caching so the App never freezes when clicking other UI elements!
+                cache_key = f"uff_{st.session_state.protein_name}_{selected_pose}"
+                if cache_key not in st.session_state.uff_cache:
+                    with st.spinner("⏳ Running UFF Energy Minimization to resolve steric clashes... (This may take ~10 seconds)"):
+                        pre_uff, post_uff, delta_uff = execute_uff_complex_minimization("protein.pdbqt", parsed_poses[selected_pose])
+                        st.session_state.uff_cache[cache_key] = (pre_uff, post_uff, delta_uff)
+                
+                pre_uff, post_uff, delta_uff = st.session_state.uff_cache[cache_key]
 
                 active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
                 
@@ -1228,6 +1240,8 @@ if run_btn and can_dock:
             progress_bar.progress(100, text="Optimization complete!")
             status_text.empty()
             st.session_state.docking_results_raw = "".join(output_log)
+            # FIX: Clear old UFF memory when a new docking run completes
+            st.session_state.uff_cache = {} 
             
             import time
             time.sleep(0.8) 
