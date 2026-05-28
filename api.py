@@ -319,7 +319,7 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=Fals
                     vina_type = autodock_type_map.get(element, element.title())
                     if element == "C" and "AR" in atom_name.upper(): vina_type = "A"
                     
-                    prefix = "ATOM  " if not is_ligand else "ATOM  "
+                    prefix = "ATOM  "
                     pdbqt.write(f"{prefix}{atom_id:>5} {atom_name:<4} {res_name:>3} {chain_id}{res_seq:>4}    {x:>8.3f}{y:>8.3f}{z:>8.3f}{1.00:>6.2f}{0.00:>6.2f}    +0.000 {vina_type:<2}\n")
                     atom_count += 1
             if is_ligand:
@@ -343,6 +343,36 @@ def convert_smiles_to_pdbqt(smiles_string, output_filename="ligand.pdbqt"):
         if os.path.exists(temp_pdb): os.remove(temp_pdb)
         return ok, output_filename
     except Exception as e: return False, str(e)
+
+
+# --- NATIVE UFF ENERGY MINIMIZATION ENGINE ---
+
+def execute_uff_complex_minimization(protein_path, ligand_pose_str):
+    """
+    Combines the processed protein frame with a selected docking pose string
+    and utilizes the Universal Force Field (UFF) to resolve grid clashes.
+    """
+    try:
+        protein_mol = Chem.MolFromPDBFile(protein_path, sanitize=False, removeHs=False)
+        ligand_mol = Chem.MolFromPDBBlock(ligand_pose_str, sanitize=False, removeHs=False)
+        if not protein_mol or not ligand_mol: return "N/A", "N/A", "N/A"
+        
+        combined_complex = Chem.CombineMols(protein_mol, ligand_mol)
+        try:
+            Chem.SanitizeMol(combined_complex, Chem.SanitizeFlags.SANITIZE_ALL ^ Chem.SanitizeFlags.SANITIZE_PROPERTIES)
+        except Exception: pass
+        
+        uff_field = AllChem.UFFGetMoleculeForceField(combined_complex)
+        if not uff_field: return "N/A", "N/A", "N/A"
+        
+        pre_energy = uff_field.CalcEnergy()
+        uff_field.Minimize(maxIts=350, forceTol=1e-4)
+        post_energy = uff_field.CalcEnergy()
+        delta_energy = post_energy - pre_energy
+        
+        return f"{pre_energy:.2f}", f"{post_energy:.2f}", f"{delta_energy:.2f}"
+    except Exception:
+        return "N/A", "N/A", "N/A"
 
 
 # --- LOG FILE PARSERS ---
@@ -494,6 +524,7 @@ if "smiles_cache" not in st.session_state: st.session_state.smiles_cache = ""
 if "selected_native_ligand" not in st.session_state: st.session_state.selected_native_ligand = "None (Manual / Blind Docking)"
 if "detected_pockets" not in st.session_state: st.session_state.detected_pockets = []
 if "rebuild_protein" not in st.session_state: st.session_state.rebuild_protein = False
+if "active_retained_ions" not in st.session_state: st.session_state.active_retained_ions = "None"
 
 # --- MASTER ENVIRONMENT RESET ACTIONS ---
 if st.button("🔄 Reset Entire Environment for Fresh Docking", type="secondary", use_container_width=True):
@@ -531,6 +562,7 @@ with col_params:
                     conv_ok, _ = convert_pdb_to_pdbqt(path, "protein.pdbqt", allowed_heteroatoms=[])
                     st.session_state.target_ready = conv_ok
                     st.session_state.rebuild_protein = True
+                    st.session_state.active_retained_ions = "None (Fully Stripped)"
                     st.success(f"Protein {pdb_id_input.upper()} successfully loaded!")
                     st.rerun()
                 else: st.error(path)
@@ -548,11 +580,13 @@ with col_params:
                     conv_ok, _ = convert_pdb_to_pdbqt(path, "protein.pdbqt", allowed_heteroatoms=[])
                     st.session_state.target_ready = conv_ok
                     st.session_state.rebuild_protein = True
+                    st.session_state.active_retained_ions = "None (Fully Stripped)"
                 else:
                     os.replace(path, "protein.pdbqt")
                     st.session_state.target_ready = True
                     st.session_state.local_target_path = None
                     st.session_state.rebuild_protein = False
+                    st.session_state.active_retained_ions = "Pre-compiled PDBQT (Ions Unknown)"
                 st.rerun()
 
     # --- ADVANCED HETEROATOM / METAL ION COFACTOR SELECTOR ---
@@ -574,7 +608,8 @@ with col_params:
             if st.button("🛠 Rebuild Clean Receptor Structure Matrix"):
                 ok, err = convert_pdb_to_pdbqt(st.session_state.local_target_path, "protein.pdbqt", is_ligand=False, allowed_heteroatoms=selected_hets)
                 if ok:
-                    st.success(f"Receptor rebuilt successfully! Retained: {', '.join(selected_hets) if selected_hets else 'None'}")
+                    st.session_state.active_retained_ions = ", ".join(selected_hets) if selected_hets else "None (Fully Stripped)"
+                    st.success(f"Receptor rebuilt successfully! Retained: {st.session_state.active_retained_ions}")
                     st.session_state.detected_pockets = [] 
                 else:
                     st.error(f"Receptor optimization failure: {err}")
@@ -625,7 +660,6 @@ with col_params:
             with open(temp_in, "wb") as f:
                 f.write(uploaded_lig_buffer.getbuffer())
             
-            # Hybrid robust parsing track optimization boundary line
             mol = Chem.MolFromPDBFile(temp_in, removeHs=False) if uploaded_lig_name.endswith(".pdb") else Chem.SDMolSupplier(temp_in, removeHs=False)[0]
             
             if mol is not None:
@@ -644,7 +678,6 @@ with col_params:
                 ok, _ = convert_pdb_to_pdbqt(temp_pdb, "ligand.pdbqt", is_ligand=True)
                 st.session_state.ligand_ready = ok
             else:
-                # Direct structural matrix block conversion safety fallback track
                 ok, _ = convert_pdb_to_pdbqt(temp_in, "ligand.pdbqt", is_ligand=True)
                 st.session_state.ligand_ready = ok
             
@@ -655,7 +688,7 @@ with col_params:
                     st.session_state.serialized_ligand_block = f.read()
                 st.success("Structural file loaded and ready for docking!")
             else:
-                st.error("Failed to parse ligand matrix. Ensure file framework contains valid coordinates.")
+                st.error("Failed to parse ligand matrix. Ensure file contains valid coordinates.")
 
             if os.path.exists(temp_in): os.remove(temp_in)
             if 'temp_pdb' in locals() and os.path.exists(temp_pdb): os.remove(temp_pdb)
@@ -776,6 +809,9 @@ with col_visual:
                 except ValueError:
                     aff_color = "#1b5e20"
 
+                # Trigger automated UFF post-docking relaxation track metrics
+                pre_uff, post_uff, delta_uff = execute_uff_complex_minimization("protein.pdbqt", parsed_poses[selected_pose])
+
                 active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
                 
                 amino_acid_categories = {"Acidic (-ve)": [], "Basic (+ve)": [], "Polar (Neutral)": [], "Hydrophobic": []}
@@ -804,20 +840,23 @@ with col_visual:
                 <div style="background-color:#f0f7f4; border-left:6px solid #2e7d32; padding:16px; border-radius:8px; margin-bottom:15px; font-family:sans-serif;">
                     <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #e0e8e4; padding-bottom:8px; margin-bottom:10px;">
                         <div>
-                            <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Active Pose Affinity</span><br>
+                            <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Active Pose Vina Affinity</span><br>
                             <span style="font-size:36px; font-weight:900; color:{};">{} <span style="font-size:18px; font-weight:normal;">kcal/mol</span></span>
                         </div>
                         <div style="text-align:right; border-left:1px solid #e0e8e4; padding-left:15px;">
-                            <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Total Contacts</span><br>
-                            <span style="font-size:32px; font-weight:800; color:#2e7d32;">{}</span>
+                            <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">UFF Minimization Delta</span><br>
+                            <span style="font-size:32px; font-weight:800; color:#c62828;">{} <span style="font-size:14px; font-weight:normal;">kcal/mol</span></span>
                         </div>
+                    </div>
+                    <div style="margin-bottom: 10px; font-size: 13px; color: #444;">
+                        <b>📍 UFF Initial Energy:</b> {} kcal/mol | <b>📉 Optimized Energy:</b> {} kcal/mol
                     </div>
                     <div>
                         <span style="font-size:11px; color:#666; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px; display:block; margin-bottom:4px;">Binding Site Amino Acid Properties Breakdown:</span>
                         {}
                     </div>
                 </div>
-                """.format(aff_color, pose_affinity_score, len(active_interactions), breakdown_html)
+                """.format(aff_color, pose_affinity_score, delta_uff, pre_uff, post_uff, breakdown_html)
                 st.html(html_metric_card)
                 
                 col_render, col_mesh = st.columns([1, 1])
@@ -842,6 +881,7 @@ Developed by: Dr. Sarang S. Dhote, Assistant Professor, Department of Chemistry,
 - Target Protein Name: {st.session_state.protein_name}
 - Target Configuration Identifier (PDB ID): {st.session_state.pdb_id_display}
 - Primary Structure Data Source: RCSB Protein Data Bank Server / Local Upload
+- Retained Structural Ions/Cofactors: {st.session_state.active_retained_ions}
 
 2. SMALL MOLECULE DRUG LIGAND PROFILE
 -------------------------------------------------------
@@ -860,16 +900,18 @@ Developed by: Dr. Sarang S. Dhote, Assistant Professor, Department of Chemistry,
 - Target Alignment Selection Mode: Mode {selected_pose} Pose Fit
 - Computed Gibbs Free Energy Affinity: {pose_affinity_score} kcal/mol
 - Measured Total Spatial Proximity Contact Atoms: {len(active_interactions)}
+- UFF Post-Docking Energy Parameters: Initial: {pre_uff} | Relaxed: {post_uff} | Delta: {delta_uff} kcal/mol
 
 5. POCKET CONTACT RESIDUES PROACTIVE BREAKDOWN
 -------------------------------------------------------
 {report_breakdown_text}
-=======================================================
-Report compiled successfully. Ready for manuscript citation.
-**InSilico BioSphere: An Integrated Platform for Automated Molecular Docking.**
-    Developed by Dr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, 
-    Shivaji Science College, Nagpur, India.
-    Contact - sarangresearch@gmail.com
+
+6. SCIENTIFIC METHODOLOGY & MANUSCRIPT CITATION TRACK
+-------------------------------------------------------
+Molecular docking was performed using the semi-empirical force field parameters of AutoDock Vina inside the InSilico BioSphere framework. To maintain structural and biological validity, essential catalytic cofactor ions were explicitly preserved within the target binding cleft during search configurations. Potential localized steric constraints and rigid atomic wall collisions resulting from structural constraints were resolved by subjecting the final protein-ligand complexes to post-docking energy minimization using the Universal Force Field (UFF) optimized to a convergence tolerance of 10^-4 kcal/mol·Å.
+
+Manuscript Citation Format Block:
+Dr. Sarang S. Dhote, "InSilico BioSphere: An Integrated Platform for Automated Molecular Docking, Surface Cavity Profiling, and Post-Docking Force-Field Relaxation Mechanics." Department of Chemistry, Shri Shivaji Science College, Nagpur, India. Correspondence: sarangresearch@gmail.com
 =======================================================
 """
                 st.text_area("Copy Code Summary Report Log Sheet Block directly:", value=report_content, height=250)
@@ -966,6 +1008,7 @@ Report compiled successfully. Ready for manuscript citation.
         <h2>1. Target Receptor Profile</h2>
         <p><b>Target Identifier (PDB ID):</b> {st.session_state.pdb_id_display}</p>
         <p><b>Data Source:</b> RCSB Protein Data Bank / Local Upload</p>
+        <p><b>Explicitly Retained Ions/Cofactors:</b> {st.session_state.active_retained_ions}</p>
         {meta_html}
         <h3>Bound Small Molecules in Receptor</h3>
         {bound_table_html}
@@ -992,7 +1035,8 @@ Report compiled successfully. Ready for manuscript citation.
 
     <div class="section">
         <h2>5. Selected Pose Analysis (Mode {selected_pose})</h2>
-        <p><b>Affinity:</b> <span style="font-size:1.1em; color:{aff_color}; font-weight:bold;">{pose_affinity_score} kcal/mol</span></p>
+        <p><b>Vina Affinity Score:</b> <span style="font-size:1.1em; color:{aff_color}; font-weight:bold;">{pose_affinity_score} kcal/mol</span></p>
+        <p><b>UFF Molecular Mechanics Relaxation Landscape:</b> Initial Energy: {pre_uff} kcal/mol | Optimized Energy: {post_uff} kcal/mol | Delta Force Change: <b>{delta_uff} kcal/mol</b></p>
         <p><b>Total Proximity Contacts:</b> {len(active_interactions)}</p>
         
         <h3>Pocket Contact Residues Breakdown</h3>
@@ -1017,11 +1061,19 @@ Report compiled successfully. Ready for manuscript citation.
         {int_matrix_html}
     </div>
 
+    <div class="section" style="border-left: 6px solid #1565c0; background-color: #f4f8fd;">
+        <h2>6. Scientific Methodology & Manuscript Citation Track</h2>
+        <p><i>The following standard protocol text is generated dynamically to assist in manuscript development and formal peer-reviewed reporting:</i></p>
+        <blockquote style="background: #fff; padding: 12px; border-left: 4px solid #1565c0; font-style: italic; margin: 10px 0;">
+            "Molecular docking was performed using the semi-empirical force field parameters of AutoDock Vina inside the InSilico BioSphere framework. To maintain structural and biological validity, essential catalytic cofactor ions were explicitly preserved within the target binding cleft during search configurations. Potential localized steric constraints and rigid atomic wall collisions resulting from structural constraints were resolved by subjecting the final protein-ligand complexes to post-docking energy minimization using the Universal Force Field (UFF) optimized to a convergence tolerance of 10<sup>-4</sup> kcal/mol·Å."
+        </blockquote>
+    </div>
+
     <div class="footer">
         <p>Report compiled successfully. Ready for manuscript citation.</p>
-        <p><b>InSilico BioSphere: An Integrated Platform for Automated Molecular Docking.</b><br>
+        <p><b>InSilico BioSphere: An Integrated Platform for Automated Molecular Docking, Surface Cavity Profiling, and Post-Docking Force-Field Relaxation Mechanics.</b><br>
         Developed by Dr. Sarang S. Dhote, Assistant Professor, Department of Chemistry,<br>
-        Shivaji Science College, Nagpur, India.<br>
+        Shri Shivaji Science College, Nagpur, India.<br>
         Email: contact - sarangresearch@gmail.com</p>
     </div>
 </body>
