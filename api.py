@@ -10,7 +10,6 @@ import numpy as np
 import pandas as pd
 import streamlit.components.v1 as components
 import base64
-import uuid  # Required for unique 3Dmol viewer IDs
 from rdkit import Chem
 from rdkit.Chem import AllChem, Draw, Descriptors
 
@@ -507,73 +506,52 @@ def generate_2d_ligand_img(mol):
         return base64.b64encode(buf.getvalue()).decode('utf-8')
     except Exception: return None
 
-def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon", show_surface=False, interactions_list=[], unique_id=None):
-    # Generate a unique ID so multiple viewers don't overwrite each other
-    if not unique_id:
-        unique_id = "viewer_" + str(uuid.uuid4()).replace("-", "")
-        
-    surface_js = f"viewer_{unique_id}.addSurface($3Dmol.SurfaceType.VDW, {{opacity:0.45, colorscheme:{{prop:'b',gradient:'rwb'}}}}, {{model:0}});" if show_surface else ""
-    
+def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon", show_surface=False, interactions_list=[]):
+    surface_js = "viewer.addSurface($3Dmol.SurfaceType.VDW, {opacity:0.45, colorscheme:{prop:'b',gradient:'rwb'}}, {model:0});" if show_surface else ""
     int_lines_js = ""
     for interact in interactions_list:
         rc = interact["r_coord"]
         lc = interact["l_coord"]
         color = "yellow" if "Hydrogen" in interact["Interaction Type"] else "cyan"
         int_lines_js += f"""
-        viewer_{unique_id}.addCylinder({{start:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, end:{{x:{lc[0]}, y:{lc[1]}, z:{lc[2]}}}, radius:0.07, color:'{color}', dashed:true}});
-        viewer_{unique_id}.addLabel("{interact['Residue Contact']} ({interact['Distance (Å)']}A)", {{position:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, backgroundColor:'white', fontColor:'black', backgroundOpacity:0.8, fontSize:11}});
+        viewer.addCylinder({{start:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, end:{{x:{lc[0]}, y:{lc[1]}, z:{lc[2]}}}, radius:0.07, color:'{color}', dashed:true}});
+        viewer.addLabel("{interact['Residue Contact']} ({interact['Distance (Å)']}A)", {{position:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, backgroundColor:'white', fontColor:'black', backgroundOpacity:0.8, fontSize:11}});
         """
 
-    # Safely encode the PDB text into Base64 so it NEVER crashes the JavaScript engine
-    rec_b64 = base64.b64encode((receptor_data or "").encode('utf-8')).decode('utf-8')
-    lig_b64 = base64.b64encode((ligand_data or "").encode('utf-8')).decode('utf-8')
-
     html_content = f"""
-    <div id="wrapper_{unique_id}" style="position:relative; width:100%; min-height: 510px;">
-        <button onclick="toggleFullScreen_{unique_id}()" style="position:absolute; top:12px; right:12px; z-index:9999; padding:6px 12px; background:#007bff; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:bold; font-family:sans-serif; box-shadow:0 2px 4px rgba(0,0,0,0.15);">🖥 Fullscreen View</button>
-        <div id="{unique_id}" style="height: 480px; width: 100%; position: relative; border-radius:10px; border:1px solid #eaeaea; background:#ffffff;"></div>
+    <div id="wrapper_div" style="position:relative; width:100%;">
+        <button onclick="toggleFullScreen()" style="position:absolute; top:12px; right:12px; z-index:9999; padding:6px 12px; background:#007bff; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:bold; font-family:sans-serif; box-shadow:0 2px 4px rgba(0,0,0,0.15);">🖥 Fullscreen View</button>
+        <div id="container" style="height: 480px; width: 100%; position: relative; border-radius:10px; border:1px solid #eaeaea; background:#ffffff;"></div>
     </div>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.0.4/3Dmol-min.js"></script>
     <script>
-        let viewer_{unique_id} = $3Dmol.createViewer(document.getElementById('{unique_id}'), {{backgroundColor: '#ffffff'}});
-        
-        // Decode and load the safe Base64 protein data
-        let rec_b64_{unique_id} = "{rec_b64}";
-        if (rec_b64_{unique_id}.length > 0) {{
-            viewer_{unique_id}.addModel(atob(rec_b64_{unique_id}), 'pdb');
+        let viewer = $3Dmol.createViewer(document.getElementById('container'), {{backgroundColor: '#ffffff'}});
+        if (`{receptor_data}`.trim().length > 0) {{
+            viewer.addModel(`{receptor_data}`, 'pdb');
             if ('{mode}' === 'cartoon') {{
-                viewer_{unique_id}.setStyle({{model: 0}}, {{cartoon: {{colorscheme: 'chain', style: 'oval', thickness: 0.6}}}});
+                viewer.setStyle({{model: 0}}, {{cartoon: {{colorscheme: 'chain', style: 'oval', thickness: 0.6}}}});
             }} else if ('{mode}' === 'spacefill') {{
-                viewer_{unique_id}.setStyle({{model: 0}}, {{sphere: {{colorscheme: 'chain', radius:1.1}}}});
+                viewer.setStyle({{model: 0}}, {{sphere: {{colorscheme: 'chain', radius:1.1}}}});
             }} else {{
-                viewer_{unique_id}.setStyle({{model: 0}}, {{stick: {{colorscheme: 'chain', radius:0.25}}}});
+                viewer.setStyle({{model: 0}}, {{stick: {{colorscheme: 'chain', radius:0.25}}}});
             }}
         }}
-        
         {surface_js}
-        
-        // Decode and load the safe Base64 ligand data
-        let lig_b64_{unique_id} = "{lig_b64}";
-        if (lig_b64_{unique_id}.length > 0) {{
-            viewer_{unique_id}.addModel(atob(lig_b64_{unique_id}), 'pdb');
-            viewer_{unique_id}.setStyle({{model: 1}}, {{stick: {{colorscheme: 'greenCarbon', radius: 0.28}}}});
+        if (`{ligand_data}`.trim().length > 0) {{
+            viewer.addModel(`{ligand_data}`, 'pdb');
+            viewer.setStyle({{model: 1}}, {{stick: {{colorscheme: 'greenCarbon', radius: 0.28}}}});
         }}
-        
         {int_lines_js}
-        
-        viewer_{unique_id}.zoomTo(); 
-        viewer_{unique_id}.render();
-        
-        // Fullscreen Logic mapped to unique IDs
-        function toggleFullScreen_{unique_id}() {{
-            let elem = document.getElementById("wrapper_{unique_id}");
-            if (!document.fullscreenElement) {{ elem.requestFullscreen(); document.getElementById("{unique_id}").style.height = "90vh"; }}
-            else {{ document.exitFullscreen(); document.getElementById("{unique_id}").style.height = "480px"; }}
+        viewer.zoomTo(); viewer.render();
+        function toggleFullScreen() {{
+            let elem = document.getElementById("wrapper_div");
+            if (!document.fullscreenElement) {{ elem.requestFullscreen(); document.getElementById("container").style.height = "90vh"; }}
+            else {{ document.exitFullscreen(); document.getElementById("container").style.height = "480px"; }}
         }}
-        document.addEventListener('fullscreenchange', () => {{ if (!document.fullscreenElement) document.getElementById("{unique_id}").style.height = "480px"; }});
+        document.addEventListener('fullscreenchange', () => {{ if (!document.fullscreenElement) document.getElementById("container").style.height = "480px"; }});
     </script>
     """
-    st.html(html_content)
+    components.html(html_content, height=510)
 
 
 # --- APPLICATION DASHBOARD WORKSPACE ---
@@ -742,6 +720,7 @@ with col_params:
                 except Exception as e: st.error(f"SMILES Parsing Failure: {e}")
             
     elif ligand_source == "Upload Structural File (.pdb, .sdf)" and uploaded_lig_buffer is not None:
+        # Prevent infinite reloading bug when ligand is uploaded
         if st.session_state.last_uploaded_ligand != uploaded_lig_name:
             temp_in = f"raw_ligand_{uploaded_lig_name}"
             with open(temp_in, "wb") as f:
@@ -894,7 +873,7 @@ with col_visual:
                     if m_img:
                         Chem.SanitizeMol(m_img)
                         img_b64 = generate_2d_ligand_img(m_img)
-                        if img_b64: st.markdown('<div style="text-align:center; background: white; padding:10px; border-radius:5px;"><img src="data:image/png;base64,{}"/></div>'.format(img_b64), unsafe_allow_html=True)
+                        if img_b64: st.markdown('<div style="text-align:center; background: white; padding:10px; border-radius:5px;"><img src="data:image/png;base64,{}"/></div>'.format(img_b64), unsafe_html=True)
                 except Exception: pass
     else:
         st.subheader("Interactive Complex Viewport")
@@ -918,18 +897,12 @@ with col_visual:
                 except ValueError:
                     aff_color = "#1b5e20"
 
-                # --- UFF FAIL-SAFE TOGGLE ---
-                run_uff_p1 = st.checkbox("⚡ Run UFF Steric Minimization (Uncheck to skip if app freezes on massive proteins)", value=True, key="p1_uff_toggle_run")
-
                 # SMART CACHE WITH DEDICATED PROGRESS UI
-                cache_key = f"uff_{st.session_state.protein_name}_{selected_pose}_{run_uff_p1}"
+                cache_key = f"uff_{st.session_state.protein_name}_{selected_pose}"
                 uff_progress_placeholder = st.empty() # Create dynamic UI slot
                 
                 if cache_key not in st.session_state.uff_cache:
-                    if run_uff_p1:
-                        pre_uff, post_uff, delta_uff = execute_uff_complex_minimization("protein.pdbqt", parsed_poses[selected_pose], uff_progress_placeholder)
-                    else:
-                        pre_uff, post_uff, delta_uff = "Skipped", "Skipped", "Skipped"
+                    pre_uff, post_uff, delta_uff = execute_uff_complex_minimization("protein.pdbqt", parsed_poses[selected_pose], uff_progress_placeholder)
                     st.session_state.uff_cache[cache_key] = (pre_uff, post_uff, delta_uff)
                 
                 # Clear progress UI safely once cached data is retrieved
