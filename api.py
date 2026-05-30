@@ -519,7 +519,7 @@ def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon
         """
 
     html_content = f"""
-    <div id="wrapper_div" style="position:relative; width:100%;">
+    <div id="wrapper_div" style="position:relative; width:100%; min-height: 510px;">
         <button onclick="toggleFullScreen()" style="position:absolute; top:12px; right:12px; z-index:9999; padding:6px 12px; background:#007bff; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:bold; font-family:sans-serif; box-shadow:0 2px 4px rgba(0,0,0,0.15);">🖥 Fullscreen View</button>
         <div id="container" style="height: 480px; width: 100%; position: relative; border-radius:10px; border:1px solid #eaeaea; background:#ffffff;"></div>
     </div>
@@ -551,7 +551,7 @@ def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon
         document.addEventListener('fullscreenchange', () => {{ if (!document.fullscreenElement) document.getElementById("container").style.height = "480px"; }});
     </script>
     """
-    components.html(html_content, height=510)
+    st.html(html_content)
 
 
 # --- APPLICATION DASHBOARD WORKSPACE ---
@@ -720,7 +720,6 @@ with col_params:
                 except Exception as e: st.error(f"SMILES Parsing Failure: {e}")
             
     elif ligand_source == "Upload Structural File (.pdb, .sdf)" and uploaded_lig_buffer is not None:
-        # Prevent infinite reloading bug when ligand is uploaded
         if st.session_state.last_uploaded_ligand != uploaded_lig_name:
             temp_in = f"raw_ligand_{uploaded_lig_name}"
             with open(temp_in, "wb") as f:
@@ -873,7 +872,7 @@ with col_visual:
                     if m_img:
                         Chem.SanitizeMol(m_img)
                         img_b64 = generate_2d_ligand_img(m_img)
-                        if img_b64: st.markdown('<div style="text-align:center; background: white; padding:10px; border-radius:5px;"><img src="data:image/png;base64,{}"/></div>'.format(img_b64), unsafe_html=True)
+                        if img_b64: st.markdown('<div style="text-align:center; background: white; padding:10px; border-radius:5px;"><img src="data:image/png;base64,{}"/></div>'.format(img_b64), unsafe_allow_html=True)
                 except Exception: pass
     else:
         st.subheader("Interactive Complex Viewport")
@@ -897,12 +896,18 @@ with col_visual:
                 except ValueError:
                     aff_color = "#1b5e20"
 
+                # --- UFF FAIL-SAFE TOGGLE ---
+                run_uff_p1 = st.checkbox("⚡ Run UFF Steric Minimization (Uncheck to skip if app freezes on massive proteins)", value=True, key="p1_uff_toggle_run")
+
                 # SMART CACHE WITH DEDICATED PROGRESS UI
-                cache_key = f"uff_{st.session_state.protein_name}_{selected_pose}"
+                cache_key = f"uff_{st.session_state.protein_name}_{selected_pose}_{run_uff_p1}"
                 uff_progress_placeholder = st.empty() # Create dynamic UI slot
                 
                 if cache_key not in st.session_state.uff_cache:
-                    pre_uff, post_uff, delta_uff = execute_uff_complex_minimization("protein.pdbqt", parsed_poses[selected_pose], uff_progress_placeholder)
+                    if run_uff_p1:
+                        pre_uff, post_uff, delta_uff = execute_uff_complex_minimization("protein.pdbqt", parsed_poses[selected_pose], uff_progress_placeholder)
+                    else:
+                        pre_uff, post_uff, delta_uff = "Skipped", "Skipped", "Skipped"
                     st.session_state.uff_cache[cache_key] = (pre_uff, post_uff, delta_uff)
                 
                 # Clear progress UI safely once cached data is retrieved
